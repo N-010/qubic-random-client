@@ -289,13 +289,18 @@ fn render_log_row(out: &mut impl Write, state: &RenderState, index: usize) {
         let available = inner.saturating_sub(prefix.len());
         let message = truncate_message(&entry.message, available);
         let padding = inner.saturating_sub(prefix.len() + message.len());
+        let message_color = log_message_color(&entry.message);
         let _ = write!(
             out,
-            "[{}] [{}] {}",
+            "[{}] [{}] ",
             timestamp.with(Color::DarkGrey),
             tag.with(color),
-            message
         );
+        if let Some(color) = message_color {
+            let _ = write!(out, "{}", message.with(color));
+        } else {
+            let _ = write!(out, "{}", message);
+        }
         if padding > 0 {
             let _ = write!(out, "{}", " ".repeat(padding));
         }
@@ -347,6 +352,16 @@ fn truncate_message(value: &str, max: usize) -> String {
     out.push_str(&value.chars().take(keep).collect::<String>());
     out.push_str("...");
     out
+}
+
+fn log_message_color(message: &str) -> Option<Color> {
+    if message.starts_with("pipeline") {
+        return Some(Color::Cyan);
+    }
+    if message.starts_with("scapi") {
+        return Some(Color::Magenta);
+    }
+    None
 }
 
 fn format_timestamp(time: SystemTime) -> String {
