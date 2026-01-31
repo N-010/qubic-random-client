@@ -8,7 +8,6 @@ mod pipeline;
 mod protocol;
 mod ticks;
 mod transport;
-mod wallet;
 
 use app::{AppResult, run};
 use config::Config;
