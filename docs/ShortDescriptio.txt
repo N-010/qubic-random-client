@@ -9,10 +9,10 @@ Random.h contains structure which needs to be filled, it has the following struc
 
 The logic is this:
 First you do a commit by publishing digest of your entropy bits, then you reveal these bits.
-Client sends two transactions immediately: commit-only with empty reveal, then reveal+commit at tick +3.
-revealedBits reveal etrnopy for the previous commit (same committedDigest).
-Commit transaction sends the configured amount; reveal transaction sends 0 amount.
-After sending the reveal, client waits commit_interval_ticks before sending next commit.
+Client sends commit-only with empty reveal, then after +3 ticks sends reveal+new commit for next round.
+revealedBits reveal etrnopy for the previous commit; committedDigest is for the next reveal.
+Both transactions send the configured commit amount (reveal-only is not used).
+Pipeline sleeps between ticks (pipeline_sleep_ms) to reduce busy work.
 To prevent people from not revealing we require some security deposit to be placed, it's sent as amount
 When you commit you get security deposit held by SC, after revealing in time you get your money back, otherwise they are kept by SC forever
 You decide the amount yourself

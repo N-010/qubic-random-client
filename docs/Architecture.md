@@ -28,7 +28,7 @@
 - Каждая транзакция: Reveal для pending + новый Commit.
 
 ### Ключевые типы/трейты
-- `Config`: `workers`, `seed`, `reveal_delay_ticks`, `tx_tick_offset`, `commit_interval_ticks`, `commit_amount`, `contract_id`, `endpoint`, `data_dir`, `persist_pending`.
+- `Config`: `workers`, `seed`, `reveal_delay_ticks`, `tx_tick_offset`, `commit_amount`, `pipeline_sleep_ms`, `contract_id`, `endpoint`, `data_dir`, `persist_pending`.
 - `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
