@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use clap::Parser;
 
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
-const DEFAULT_COMMIT_AMOUNT: u64 = 10_000_000;
-const DEFAULT_COMMIT_INTERVAL_TICKS: u32 = 10;
+const DEFAULT_COMMIT_AMOUNT: u64 = 1000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
 const DEFAULT_TX_TICK_OFFSET: u32 = 5;
+const DEFAULT_PIPELINE_SLEEP_MS: u64 = 200;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 const DEFAULT_DATA_DIR: &str = "data";
 
@@ -25,11 +25,11 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_TX_TICK_OFFSET)]
     pub tx_tick_offset: u32,
 
-    #[arg(long, default_value_t = DEFAULT_COMMIT_INTERVAL_TICKS)]
-    pub commit_interval_ticks: u32,
-
     #[arg(long, default_value_t = DEFAULT_COMMIT_AMOUNT)]
     pub commit_amount: u64,
+
+    #[arg(long, default_value_t = DEFAULT_PIPELINE_SLEEP_MS)]
+    pub pipeline_sleep_ms: u64,
 
     #[arg(long, default_value = DEFAULT_CONTRACT_ID)]
     pub contract_id: String,
@@ -53,8 +53,8 @@ pub struct Config {
     pub workers: usize,
     pub reveal_delay_ticks: u32,
     pub tx_tick_offset: u32,
-    pub commit_interval_ticks: u32,
     pub commit_amount: u64,
+    pub pipeline_sleep_ms: u64,
     pub contract_id: String,
     pub endpoint: String,
     pub data_dir: PathBuf,
@@ -79,8 +79,8 @@ impl Config {
             workers,
             reveal_delay_ticks: cli.reveal_delay_ticks,
             tx_tick_offset: cli.tx_tick_offset,
-            commit_interval_ticks: cli.commit_interval_ticks,
             commit_amount: cli.commit_amount,
+            pipeline_sleep_ms: cli.pipeline_sleep_ms,
             contract_id: cli.contract_id,
             endpoint: cli.endpoint,
             data_dir: cli.data_dir,
