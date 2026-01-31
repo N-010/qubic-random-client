@@ -11,19 +11,11 @@ use crate::console;
 use crate::pipeline::{Pipeline, run_job_dispatcher};
 use crate::ticks::ScapiTickSource;
 use crate::transport::{ScTransport, ScapiClient, ScapiContractTransport, ScapiRpcClient};
-use crate::wallet::QubicWallet;
 
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub async fn run(config: Config) -> AppResult<()> {
     console::init();
-    let wallet = match QubicWallet::from_seed(&config.seed) {
-        Ok(wallet) => wallet,
-        Err(err) => {
-            console::log_warn(format!("failed to derive wallet from seed: {}", err));
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
-        }
-    };
     let scapi_wallet = match ScapiQubicWallet::from_seed(&config.seed) {
         Ok(wallet) => wallet,
         Err(err) => {
@@ -38,8 +30,7 @@ pub async fn run(config: Config) -> AppResult<()> {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
         }
     };
-    let wallet = Arc::new(wallet);
-    let identity = wallet.get_identity();
+    let identity = scapi_wallet.get_identity();
 
     let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(config.endpoint.clone()));
     let transport: Arc<dyn ScTransport> = Arc::new(ScapiContractTransport::new(

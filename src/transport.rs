@@ -44,41 +44,6 @@ pub trait ScTransport: Send + Sync {
     ) -> Result<String, TransportError>;
 }
 
-#[derive(Debug, Default)]
-pub struct NullScapiClient;
-
-#[async_trait]
-impl ScapiClient for NullScapiClient {
-    async fn get_tick_info(&self) -> Result<TickInfo, TransportError> {
-        Err(TransportError {
-            message: "SCAPI client not configured".to_string(),
-        })
-    }
-
-    async fn get_balances(&self, _identity: &str) -> Result<Vec<BalanceEntry>, TransportError> {
-        Err(TransportError {
-            message: "SCAPI client not configured".to_string(),
-        })
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct NullTransport;
-
-#[async_trait]
-impl ScTransport for NullTransport {
-    async fn send_reveal_and_commit(
-        &self,
-        _input: RevealAndCommitInput,
-        _amount: u64,
-        _tick: u32,
-    ) -> Result<String, TransportError> {
-        Err(TransportError {
-            message: "Transport not configured".to_string(),
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ScapiRpcClient {
     rpc: RpcClient,
