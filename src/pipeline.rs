@@ -6,12 +6,9 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::console;
 use crate::entropy::{commit_digest, fill_secure_bits};
-use crate::pipeline::state::{PendingItem, PendingState};
 use crate::protocol::RevealAndCommitInput;
 use crate::ticks::TickInfo;
 use crate::transport::ScTransport;
-
-pub mod state;
 
 #[derive(Debug)]
 pub struct RevealCommitJob {
@@ -22,14 +19,14 @@ pub struct RevealCommitJob {
 
 pub struct Pipeline {
     config: Config,
-    pending: PendingState,
+    next_allowed_tick: Option<u32>,
 }
 
 impl Pipeline {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            pending: PendingState::new(),
+            next_allowed_tick: None,
         }
     }
 
@@ -39,54 +36,51 @@ impl Pipeline {
         job_tx: mpsc::Sender<RevealCommitJob>,
     ) {
         while let Some(tick) = tick_rx.recv().await {
-            let reveal = self
-                .pending
-                .pop_revealable(tick.tick, self.config.reveal_delay_ticks);
-
-            let (reveal_bits, should_send) = match reveal {
-                Some(item) => (item.revealed_bits, true),
-                None => {
-                    if self.pending.len() == 0 {
-                        console::log_info("pipeline bootstrap: sending commit only");
-                        ([0u8; 512], true)
-                    } else {
-                        ([0u8; 512], false)
-                    }
+            if let Some(next_tick) = self.next_allowed_tick {
+                if tick.tick < next_tick {
+                    continue;
                 }
-            };
-
-            if !should_send {
-                continue;
             }
 
-            let new_pending = self.next_pending(tick.tick);
-            let input = RevealAndCommitInput {
-                revealed_bits: reveal_bits,
-                committed_digest: new_pending.committed_digest,
+            let scheduled_tick = tick.tick.saturating_add(self.config.tx_tick_offset);
+            let reveal_tick = scheduled_tick.saturating_add(self.config.reveal_delay_ticks);
+
+            let mut revealed_bits = [0u8; 512];
+            fill_secure_bits(&mut revealed_bits);
+            let committed_digest = commit_digest(&revealed_bits);
+
+            let commit_input = RevealAndCommitInput {
+                revealed_bits: [0u8; 512],
+                committed_digest,
             };
-            let job = RevealCommitJob {
-                input,
-                amount: self.config.deposit_amount,
-                tick: tick.tick,
+            let commit_job = RevealCommitJob {
+                input: commit_input,
+                amount: self.config.commit_amount,
+                tick: scheduled_tick,
             };
 
-            if job_tx.send(job).await.is_err() {
+            if job_tx.send(commit_job).await.is_err() {
                 break;
             }
-            self.pending.push(new_pending);
-        }
-    }
 
-    fn next_pending(&mut self, tick: u32) -> PendingItem {
-        let mut bits = [0u8; 512];
-        fill_secure_bits(&mut bits);
-        let digest = commit_digest(&bits);
+            let reveal_input = RevealAndCommitInput {
+                revealed_bits,
+                committed_digest,
+            };
+            let reveal_job = RevealCommitJob {
+                input: reveal_input,
+                amount: 0,
+                tick: reveal_tick,
+            };
 
-        PendingItem {
-            commit_tick: tick,
-            revealed_bits: bits,
-            committed_digest: digest,
-            amount: self.config.deposit_amount,
+            if job_tx.send(reveal_job).await.is_err() {
+                break;
+            }
+
+            if self.config.commit_interval_ticks > 0 {
+                self.next_allowed_tick =
+                    Some(reveal_tick.saturating_add(self.config.commit_interval_ticks));
+            }
         }
     }
 }

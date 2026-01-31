@@ -7,6 +7,7 @@ name = "RandomCient"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "crossterm 0.29.0",
  "rand 0.8.5",
@@ -3274,15 +3275,15 @@ dependencies = [
 
 [[package]]
 name = "portable-atomic"
-version = "1.13.0"
+version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f89776e4d69bb58bc6993e99ffa1d11f228b839984854c7daeb5d37f87cbe950"
+checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "portable-atomic-util"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8a2f0d8d040d7848a709caf78912debcc3f33ee4b3cac47d73d1e1069e83507"
+checksum = "7a9db96d7fa8782dd8c15ce32ffe8680bbd1e978a43bf51a34d39483540495f5"
 dependencies = [
  "portable-atomic",
 ]
@@ -3907,8 +3908,8 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 
 [[package]]
 name = "scapi"
-version = "0.2.2"
-source = "git+https://github.com/N-010/scapi#5cd026d940b0de725a27fb7619cb45c53eee0b11"
+version = "0.2.4"
+source = "git+https://github.com/N-010/scapi#5ad8595a32fdfd59f635d695fa8fde189cc81073"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3923,6 +3924,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "thiserror",
+ "tiny-keccak",
  "tokio",
  "tracing",
  "tracing-subscriber",

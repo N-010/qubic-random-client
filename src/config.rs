@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use clap::Parser;
 
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
-const DEFAULT_DEPOSIT_AMOUNT: u64 = 1000;
+const DEFAULT_COMMIT_AMOUNT: u64 = 10_000_000;
+const DEFAULT_COMMIT_INTERVAL_TICKS: u32 = 10;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
+const DEFAULT_TX_TICK_OFFSET: u32 = 5;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 const DEFAULT_DATA_DIR: &str = "data";
 
@@ -17,20 +19,20 @@ pub struct Cli {
     #[arg(long, default_value_t = 0)]
     pub workers: usize,
 
-    #[arg(long, default_value_t = 0)]
-    pub threads: usize,
-
     #[arg(long, default_value_t = DEFAULT_REVEAL_DELAY_TICKS)]
     pub reveal_delay_ticks: u32,
 
-    #[arg(long, default_value_t = DEFAULT_DEPOSIT_AMOUNT)]
-    pub deposit_amount: u64,
+    #[arg(long, default_value_t = DEFAULT_TX_TICK_OFFSET)]
+    pub tx_tick_offset: u32,
+
+    #[arg(long, default_value_t = DEFAULT_COMMIT_INTERVAL_TICKS)]
+    pub commit_interval_ticks: u32,
+
+    #[arg(long, default_value_t = DEFAULT_COMMIT_AMOUNT)]
+    pub commit_amount: u64,
 
     #[arg(long, default_value = DEFAULT_CONTRACT_ID)]
     pub contract_id: String,
-
-    #[arg(long, default_value_t = 3)]
-    pub contract_index: u32,
 
     #[arg(long, default_value = DEFAULT_ENDPOINT)]
     pub endpoint: String,
@@ -49,11 +51,11 @@ pub struct Cli {
 pub struct Config {
     pub seed: String,
     pub workers: usize,
-    pub threads: usize,
     pub reveal_delay_ticks: u32,
-    pub deposit_amount: u64,
+    pub tx_tick_offset: u32,
+    pub commit_interval_ticks: u32,
+    pub commit_amount: u64,
     pub contract_id: String,
-    pub contract_index: u32,
     pub endpoint: String,
     pub data_dir: PathBuf,
     pub persist_pending: bool,
@@ -64,15 +66,10 @@ impl Config {
     pub fn from_cli() -> Result<Self, String> {
         let cli = Cli::parse();
         validate_seed(&cli.seed)?;
-        let threads = if cli.threads == 0 {
+        let workers = if cli.workers == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
-        } else {
-            cli.threads
-        };
-        let workers = if cli.workers == 0 {
-            threads
         } else {
             cli.workers
         };
@@ -80,11 +77,11 @@ impl Config {
         Ok(Self {
             seed: cli.seed,
             workers,
-            threads,
             reveal_delay_ticks: cli.reveal_delay_ticks,
-            deposit_amount: cli.deposit_amount,
+            tx_tick_offset: cli.tx_tick_offset,
+            commit_interval_ticks: cli.commit_interval_ticks,
+            commit_amount: cli.commit_amount,
             contract_id: cli.contract_id,
-            contract_index: cli.contract_index,
             endpoint: cli.endpoint,
             data_dir: cli.data_dir,
             persist_pending: cli.persist_pending,

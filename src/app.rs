@@ -1,6 +1,8 @@
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
 use tokio::sync::mpsc;
 
 use crate::balance::run_balance_watcher;
@@ -22,12 +24,30 @@ pub async fn run(config: Config) -> AppResult<()> {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
         }
     };
+    let scapi_wallet = match ScapiQubicWallet::from_seed(&config.seed) {
+        Ok(wallet) => wallet,
+        Err(err) => {
+            console::log_warn(format!("failed to derive scapi wallet from seed: {}", err));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
+        }
+    };
+    let contract_id = match ScapiQubicId::from_str(&config.contract_id) {
+        Ok(contract_id) => contract_id,
+        Err(err) => {
+            console::log_warn(format!("invalid contract id: {}", err));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
+        }
+    };
     let wallet = Arc::new(wallet);
     let identity = wallet.get_identity();
 
     let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(config.endpoint.clone()));
-    let transport: Arc<dyn ScTransport> =
-        Arc::new(ScapiContractTransport::new(config.contract_index, 1));
+    let transport: Arc<dyn ScTransport> = Arc::new(ScapiContractTransport::new(
+        config.endpoint.clone(),
+        scapi_wallet,
+        contract_id,
+        1,
+    ));
 
     let (tick_tx, tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
