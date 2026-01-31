@@ -29,7 +29,7 @@ impl ScapiTickSource {
         }
     }
 
-    pub async fn run(mut self, mut tx: mpsc::Sender<TickInfo>) {
+    pub async fn run(mut self, tx: mpsc::Sender<TickInfo>) {
         loop {
             match self.client.get_tick_info().await {
                 Ok(info) => {
