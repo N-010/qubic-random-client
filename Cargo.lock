@@ -10,7 +10,6 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "crossterm 0.29.0",
- "rand 0.8.5",
  "rand_core 0.6.4",
  "scapi",
  "tiny-keccak",
