@@ -44,3 +44,6 @@
 ## Notes (ASCII)
 - TickInfo uses u32 for epoch/tick/tick_duration_ms in this client.
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
+
+- CLI: --seed required; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
+- commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.

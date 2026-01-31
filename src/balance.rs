@@ -12,9 +12,13 @@ pub struct BalanceEntry {
     pub amount: u64,
 }
 
-pub async fn run_balance_watcher(client: Arc<dyn ScapiClient>, interval: Duration) {
+pub async fn run_balance_watcher(
+    client: Arc<dyn ScapiClient>,
+    identity: String,
+    interval: Duration,
+) {
     loop {
-        match client.get_balances().await {
+        match client.get_balances(&identity).await {
             Ok(entries) => {
                 if entries.is_empty() {
                     console::set_balance_line("empty");

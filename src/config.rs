@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
+const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
 const DEFAULT_DEPOSIT_AMOUNT: u64 = 1000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
@@ -12,7 +12,7 @@ const DEFAULT_DATA_DIR: &str = "data";
 #[command(name = "random-client", version, about = "Random SC client")]
 pub struct Cli {
     #[arg(long)]
-    pub seed: Option<String>,
+    pub seed: String,
 
     #[arg(long, default_value_t = 0)]
     pub workers: usize,
@@ -47,7 +47,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub seed: Option<String>,
+    pub seed: String,
     pub workers: usize,
     pub threads: usize,
     pub reveal_delay_ticks: u32,
@@ -63,9 +63,7 @@ pub struct Config {
 impl Config {
     pub fn from_cli() -> Result<Self, String> {
         let cli = Cli::parse();
-        if let Some(seed) = cli.seed.as_deref() {
-            validate_seed(seed)?;
-        }
+        validate_seed(&cli.seed)?;
         let threads = if cli.threads == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())

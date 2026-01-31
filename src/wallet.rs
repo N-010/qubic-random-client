@@ -8,7 +8,8 @@ use crate::four_q::ops::{
 };
 use crate::four_q::types::PointAffine;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct QubicId(pub [u8; 32]);
 
 impl QubicId {
@@ -37,6 +38,30 @@ impl QubicId {
 
         String::from_utf8(identity.to_vec()).unwrap()
     }
+
+    pub fn from_identity(identity: &str) -> Result<Self, String> {
+        if identity.len() != 60 {
+            return Err("identity must be 60 characters".to_string());
+        }
+        if !identity.bytes().all(|b| (b'A'..=b'Z').contains(&b)) {
+            return Err("identity must contain only A-Z characters".to_string());
+        }
+
+        let id = identity.as_bytes();
+        let mut buffer = [0u8; 32];
+
+        for i in 0..4 {
+            for j in (0..14usize).rev() {
+                let fragment = u64::from_le_bytes(buffer[i << 3..(i << 3) + 8].try_into().unwrap())
+                    .wrapping_mul(26)
+                    .wrapping_add((id[i * 14 + j] - b'A') as u64);
+                let bytes = fragment.to_le_bytes();
+                buffer[i << 3..(i << 3) + 8].copy_from_slice(&bytes);
+            }
+        }
+
+        Ok(Self(buffer))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +72,7 @@ pub struct QubicWallet {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub struct Signature(pub [u8; 64]);
 
 impl QubicWallet {
@@ -152,11 +178,15 @@ impl QubicWallet {
         let mut h_u64 = bytes_to_u64x8(&h_bytes);
         let mut signature_u64 = bytes_to_u64x8(&signature);
 
-        montgomery_multiply_mod_order(&r_u64[0..4], &MONTGOMERY_R_PRIME, &mut r_u64[0..4]);
+        let mut r_tmp = [0u64; 4];
+        r_tmp.copy_from_slice(&r_u64[0..4]);
+        montgomery_multiply_mod_order(&r_tmp, &MONTGOMERY_R_PRIME, &mut r_u64[0..4]);
         let r_i = r_u64;
         montgomery_multiply_mod_order(&r_i[0..4], &ONE, &mut r_u64[0..4]);
 
-        montgomery_multiply_mod_order(&h_u64[0..4], &MONTGOMERY_R_PRIME, &mut h_u64[0..4]);
+        let mut h_tmp = [0u64; 4];
+        h_tmp.copy_from_slice(&h_u64[0..4]);
+        montgomery_multiply_mod_order(&h_tmp, &MONTGOMERY_R_PRIME, &mut h_u64[0..4]);
         let h_i = h_u64;
         montgomery_multiply_mod_order(&h_i[0..4], &ONE, &mut h_u64[0..4]);
 

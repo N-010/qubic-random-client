@@ -1,39 +1,16 @@
-use blake3::Hasher;
-use tiny_keccak::{Hasher as K12Hasher, KangarooTwelve};
+use rand_core::{OsRng, RngCore};
+use tiny_keccak::{Hasher as K12Hasher, IntoXof, KangarooTwelve, Xof};
 
-#[derive(Debug)]
-pub struct XorShift64 {
-    state: u64,
-}
-
-impl XorShift64 {
-    pub fn new(seed: u64) -> Self {
-        let seed = if seed == 0 { 0x9e3779b97f4a7c15 } else { seed };
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
-
-    pub fn next_bytes(&mut self, out: &mut [u8]) {
-        for chunk in out.chunks_mut(8) {
-            let v = self.next_u64().to_le_bytes();
-            let len = chunk.len();
-            chunk.copy_from_slice(&v[..len]);
-        }
-    }
+pub fn fill_secure_bits(out: &mut [u8; 512]) {
+    OsRng.fill_bytes(out);
 }
 
 pub fn commit_digest(bits: &[u8; 512]) -> [u8; 32] {
-    let mut hasher = Hasher::new();
+    let mut hasher = KangarooTwelve::new(b"");
     hasher.update(bits);
-    hasher.finalize().into()
+    let mut out = [0u8; 32];
+    hasher.into_xof().squeeze(&mut out);
+    out
 }
 
 pub fn seed_to_subseed(seed: &str) -> Result<[u8; 32], String> {
@@ -53,11 +30,4 @@ pub fn seed_to_subseed(seed: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     hasher.finalize(&mut out);
     Ok(out)
-}
-
-pub fn seed_to_rng_seed(seed: &str) -> Result<u64, String> {
-    let subseed = seed_to_subseed(seed)?;
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&subseed[..8]);
-    Ok(u64::from_le_bytes(bytes))
 }
