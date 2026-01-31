@@ -8,29 +8,26 @@ use crate::config::Config;
 use crate::console;
 use crate::pipeline::{Pipeline, run_job_dispatcher};
 use crate::ticks::ScapiTickSource;
-use crate::transport::{NullTransport, ScTransport, ScapiClient, ScapiRpcClient};
+use crate::transport::{ScTransport, ScapiClient, ScapiContractTransport, ScapiRpcClient};
 use crate::wallet::QubicWallet;
 
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub async fn run(config: Config) -> AppResult<()> {
     console::init();
-    let identity = match config.seed.as_deref() {
-        Some(seed) => match QubicWallet::from_seed(seed) {
-            Ok(wallet) => Some(wallet.get_identity()),
-            Err(err) => {
-                console::log_warn(format!("failed to derive identity from seed: {}", err));
-                None
-            }
-        },
-        None => None,
+    let wallet = match QubicWallet::from_seed(&config.seed) {
+        Ok(wallet) => wallet,
+        Err(err) => {
+            console::log_warn(format!("failed to derive wallet from seed: {}", err));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
+        }
     };
+    let wallet = Arc::new(wallet);
+    let identity = wallet.get_identity();
 
-    let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(
-        config.endpoint.clone(),
-        identity.clone(),
-    ));
-    let transport: Arc<dyn ScTransport> = Arc::new(NullTransport::default());
+    let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(config.endpoint.clone()));
+    let transport: Arc<dyn ScTransport> =
+        Arc::new(ScapiContractTransport::new(config.contract_index, 1));
 
     let (tick_tx, tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
@@ -38,14 +35,11 @@ pub async fn run(config: Config) -> AppResult<()> {
     let tick_source = ScapiTickSource::new(client.clone(), Duration::from_millis(200));
     tokio::spawn(tick_source.run(tick_tx));
 
-    if identity.is_some() {
-        tokio::spawn(run_balance_watcher(
-            client.clone(),
-            Duration::from_millis(config.balance_interval_ms),
-        ));
-    } else {
-        console::log_warn("balance watcher disabled: --seed not set");
-    }
+    tokio::spawn(run_balance_watcher(
+        client.clone(),
+        identity,
+        Duration::from_millis(config.balance_interval_ms),
+    ));
 
     let pipeline = Pipeline::new(config.clone());
     tokio::spawn(pipeline.run(tick_rx, job_tx));
