@@ -6,6 +6,7 @@ const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
 const DEFAULT_TX_TICK_OFFSET: u32 = 5;
 const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 100;
 const DEFAULT_PIPELINE_SLEEP_MS: u64 = 200;
+const DEFAULT_PIPELINE_COUNT: usize = 3;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
 const DEFAULT_BALANCE_INTERVAL_MS: u64 = 1000;
@@ -31,6 +32,9 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_PIPELINE_SLEEP_MS)]
     pub pipeline_sleep_ms: u64,
 
+    #[arg(long, default_value_t = DEFAULT_PIPELINE_COUNT)]
+    pub pipeline_count: usize,
+
     #[arg(long, default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS)]
     pub tick_poll_interval_ms: u64,
 
@@ -55,6 +59,7 @@ pub struct Config {
     pub tx_tick_offset: u32,
     pub commit_amount: u64,
     pub pipeline_sleep_ms: u64,
+    pub pipeline_count: usize,
     pub tick_poll_interval_ms: u64,
     pub contract_id: String,
     pub endpoint: String,
@@ -80,6 +85,7 @@ impl Config {
             tx_tick_offset: cli.tx_tick_offset,
             commit_amount: cli.commit_amount,
             pipeline_sleep_ms: cli.pipeline_sleep_ms,
+            pipeline_count: cli.pipeline_count,
             tick_poll_interval_ms: cli.tick_poll_interval_ms,
             contract_id: cli.contract_id,
             endpoint: cli.endpoint,

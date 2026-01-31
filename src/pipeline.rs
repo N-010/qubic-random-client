@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ pub struct Pipeline {
     config: Config,
     pending: Option<PendingCommit>,
     tick: TickInfo,
+    id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -32,11 +34,12 @@ struct PendingCommit {
 }
 
 impl Pipeline {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, id: usize) -> Self {
         Self {
             config,
             pending: None,
             tick: Default::default(),
+            id,
         }
     }
 
@@ -62,6 +65,7 @@ impl Pipeline {
                     let mut revealed_bits = [0u8; 512];
                     fill_secure_bits(&mut revealed_bits);
                     let committed_digest = commit_digest(&revealed_bits);
+                    let commit = format_commit(&committed_digest);
 
                     let commit_input = RevealAndCommitInput {
                         revealed_bits: [0u8; 512],
@@ -74,10 +78,12 @@ impl Pipeline {
                     };
 
                     console::log_info(format!(
-                        "pipeline commit-only: now_tick={now_tick} commit_tick={commit_tick} amount={amount}",
+                        "pipeline[{id}] commit-only: now_tick={now_tick} commit_tick={commit_tick} amount={amount} commit={commit}",
+                        id = self.id,
                         now_tick = tick.tick,
                         commit_tick = scheduled_tick,
-                        amount = self.config.commit_amount
+                        amount = self.config.commit_amount,
+                        commit = commit
                     ));
                     if job_tx.send(commit_job).await.is_err() {
                         break;
@@ -91,7 +97,8 @@ impl Pipeline {
                 Some(pending) => {
                     if tick.tick < pending.reveal_send_at_tick - 2 {
                         console::log_info(format!(
-                            "pipeline waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
+                            "pipeline[{id}] waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
+                            id = self.id,
                             now_tick = tick.tick,
                             reveal_send_at_tick = pending.reveal_send_at_tick,
                         ));
@@ -102,6 +109,7 @@ impl Pipeline {
                     let mut next_bits = [0u8; 512];
                     fill_secure_bits(&mut next_bits);
                     let next_digest = commit_digest(&next_bits);
+                    let commit = format_commit(&next_digest);
 
                     let reveal_input = RevealAndCommitInput {
                         revealed_bits: pending.revealed_bits,
@@ -114,10 +122,12 @@ impl Pipeline {
                     };
 
                     console::log_info(format!(
-                        "pipeline reveal+commit: now_tick={now_tick} next_reveal_tick={next_reveal_tick} amount={amount}",
+                        "pipeline[{id}] reveal+commit: now_tick={now_tick} next_reveal_tick={next_reveal_tick} amount={amount} commit={commit}",
+                        id = self.id,
                         now_tick = tick.tick,
                         next_reveal_tick = next_reveal_tick,
-                        amount = self.config.commit_amount
+                        amount = self.config.commit_amount,
+                        commit = commit
                     ));
                     if job_tx.send(reveal_job).await.is_err() {
                         break;
@@ -133,6 +143,14 @@ impl Pipeline {
             sleep(sleep_duration).await;
         }
     }
+}
+
+fn format_commit(commit: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in commit {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 pub async fn run_job_dispatcher(
