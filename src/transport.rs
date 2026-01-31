@@ -6,10 +6,13 @@ use crate::balance::BalanceEntry;
 use crate::protocol::RevealAndCommitInput;
 use crate::ticks::TickInfo;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use scapi::rpc::RpcClient;
 use scapi::rpc::get_balance_with;
 use scapi::rpc::get_tick_info_with;
-use scapi::sc_api::RequestDataBuilder;
+use scapi::rpc::post::broadcast_transaction_with;
+use scapi::{QubicId, QubicWallet, build_ticket_tx_bytes};
 
 #[derive(Debug)]
 pub struct TransportError {
@@ -129,15 +132,28 @@ impl ScapiClient for ScapiRpcClient {
 
 #[derive(Debug, Clone)]
 pub struct ScapiContractTransport {
-    contract_index: u32,
-    input_type: u32,
+    rpc: RpcClient,
+    contract_id: QubicId,
+    input_type: u16,
+    wallet: QubicWallet,
+    identity: String,
 }
 
 impl ScapiContractTransport {
-    pub fn new(contract_index: u32, input_type: u32) -> Self {
+    pub fn new(
+        base_url: String,
+        wallet: QubicWallet,
+        contract_id: QubicId,
+        input_type: u16,
+    ) -> Self {
+        let rpc = RpcClient::with_base_url(Cow::Owned(base_url));
+        let identity = wallet.public_key.get_identity();
         Self {
-            contract_index,
+            rpc,
+            contract_id,
             input_type,
+            wallet,
+            identity,
         }
     }
 }
@@ -147,23 +163,53 @@ impl ScTransport for ScapiContractTransport {
     async fn send_reveal_and_commit(
         &self,
         input: RevealAndCommitInput,
-        _amount: u64,
-        _tick: u32,
+        amount: u64,
+        tick: u32,
     ) -> Result<String, TransportError> {
+        if amount > 0 {
+            let response = get_balance_with(&self.rpc, &self.identity)
+                .await
+                .map_err(|err| TransportError {
+                    message: format!("failed to fetch balance: {}", err),
+                })?;
+            let balance =
+                response
+                    .balance
+                    .balance
+                    .parse::<u64>()
+                    .map_err(|err| TransportError {
+                        message: format!("invalid balance value: {}", err),
+                    })?;
+            if balance < amount {
+                return Err(TransportError {
+                    message: format!("insufficient balance: have {} need {}", balance, amount),
+                });
+            }
+        }
+
         let mut payload = Vec::with_capacity(544);
         payload.extend_from_slice(&input.revealed_bits);
         payload.extend_from_slice(&input.committed_digest);
 
-        RequestDataBuilder::new()
-            .set_contract_index(self.contract_index)
-            .set_input_type(self.input_type)
-            .add_bytes(&payload)
-            .send()
+        let tx_bytes = build_ticket_tx_bytes(
+            &self.wallet,
+            self.contract_id,
+            amount,
+            tick,
+            self.input_type,
+            payload,
+        )
+        .map_err(|err| TransportError {
+            message: format!("failed to build transaction: {}", err),
+        })?;
+
+        let encoded = BASE64_STANDARD.encode(tx_bytes);
+        let response = broadcast_transaction_with(&self.rpc, encoded)
             .await
             .map_err(|err| TransportError {
-                message: format!("scapi send failed: {}", err),
+                message: format!("broadcast transaction failed: {}", err),
             })?;
 
-        Ok("ok".to_string())
+        Ok(response.transaction_id)
     }
 }
