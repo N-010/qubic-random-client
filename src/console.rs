@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -170,11 +170,7 @@ fn render_all(out: &mut impl Write, state: &RenderState) {
 }
 
 fn render_balance(out: &mut impl Write, state: &RenderState) {
-    let _ = queue!(
-        out,
-        MoveTo(0, 0),
-        Clear(ClearType::CurrentLine)
-    );
+    let _ = queue!(out, MoveTo(0, 0), Clear(ClearType::CurrentLine));
     let label = "Balance:";
     let line = format!("{} {}", label, state.balance);
     let line = truncate_to_width(&line, state.width);
@@ -183,11 +179,7 @@ fn render_balance(out: &mut impl Write, state: &RenderState) {
 }
 
 fn render_tick(out: &mut impl Write, state: &RenderState) {
-    let _ = queue!(
-        out,
-        MoveTo(0, 1),
-        Clear(ClearType::CurrentLine)
-    );
+    let _ = queue!(out, MoveTo(0, 1), Clear(ClearType::CurrentLine));
     let label = "Tick:";
     let line = format!("{} {}", label, state.tick);
     let line = truncate_to_width(&line, state.width);
@@ -196,11 +188,7 @@ fn render_tick(out: &mut impl Write, state: &RenderState) {
 }
 
 fn render_top_border(out: &mut impl Write, state: &RenderState) {
-    let _ = queue!(
-        out,
-        MoveTo(0, 2),
-        Clear(ClearType::CurrentLine)
-    );
+    let _ = queue!(out, MoveTo(0, 2), Clear(ClearType::CurrentLine));
     let width = state.width.max(1) as usize;
     if width < 2 {
         let _ = out.flush();

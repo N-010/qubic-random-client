@@ -73,7 +73,11 @@ impl Config {
         } else {
             cli.threads
         };
-        let workers = if cli.workers == 0 { threads } else { cli.workers };
+        let workers = if cli.workers == 0 {
+            threads
+        } else {
+            cli.workers
+        };
 
         Ok(Self {
             seed: cli.seed,

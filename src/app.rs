@@ -6,9 +6,9 @@ use tokio::sync::mpsc;
 use crate::balance::run_balance_watcher;
 use crate::config::Config;
 use crate::console;
-use crate::pipeline::{run_job_dispatcher, Pipeline};
+use crate::pipeline::{Pipeline, run_job_dispatcher};
 use crate::ticks::ScapiTickSource;
-use crate::transport::{NullTransport, ScapiClient, ScTransport, ScapiRpcClient};
+use crate::transport::{NullTransport, ScTransport, ScapiClient, ScapiRpcClient};
 use crate::wallet::QubicWallet;
 
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -26,8 +26,10 @@ pub async fn run(config: Config) -> AppResult<()> {
         None => None,
     };
 
-    let client: Arc<dyn ScapiClient> =
-        Arc::new(ScapiRpcClient::new(config.endpoint.clone(), identity.clone()));
+    let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(
+        config.endpoint.clone(),
+        identity.clone(),
+    ));
     let transport: Arc<dyn ScTransport> = Arc::new(NullTransport::default());
 
     let (tick_tx, tick_rx) = mpsc::channel(64);
