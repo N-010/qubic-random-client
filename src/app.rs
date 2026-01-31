@@ -49,7 +49,7 @@ pub async fn run(config: Config) -> AppResult<()> {
         1,
     ));
 
-    let (tick_tx, tick_rx) = mpsc::channel(64);
+    let (tick_tx, mut tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
 
     let tick_source = ScapiTickSource::new(
@@ -64,8 +64,26 @@ pub async fn run(config: Config) -> AppResult<()> {
         Duration::from_millis(config.balance_interval_ms),
     ));
 
-    let pipeline = Pipeline::new(config.clone());
-    tokio::spawn(pipeline.run(tick_rx, job_tx));
+    let pipeline_count = config.pipeline_count.max(1);
+    let mut pipeline_txs = Vec::with_capacity(pipeline_count);
+    for id in 0..pipeline_count {
+        let (pipeline_tx, pipeline_rx) = mpsc::channel(64);
+        let pipeline = Pipeline::new(config.clone(), id);
+        tokio::spawn(pipeline.run(pipeline_rx, job_tx.clone()));
+        pipeline_txs.push(pipeline_tx);
+    }
+
+    tokio::spawn(async move {
+        let mut pipeline_txs = pipeline_txs;
+        while let Some(tick) = tick_rx.recv().await {
+            pipeline_txs.retain(|tx| !tx.is_closed());
+            for tx in &pipeline_txs {
+                if tx.send(tick.clone()).await.is_err() {
+                    // Dropped pipelines will be cleaned up on the next tick.
+                }
+            }
+        }
+    });
 
     tokio::spawn(run_job_dispatcher(job_rx, transport, config.workers));
 

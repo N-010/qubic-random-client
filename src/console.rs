@@ -9,7 +9,7 @@ use crossterm::terminal::{self, Clear, ClearType};
 use crossterm::{execute, queue};
 use tokio::sync::mpsc;
 
-const HEADER_LINES: u16 = 3;
+const HEADER_LINES: u16 = 2;
 const COMMAND_HINT: &str = "Commands: Ctrl+C to exit";
 
 #[derive(Clone, Copy)]
@@ -132,11 +132,11 @@ async fn run_renderer(mut rx: mpsc::Receiver<ConsoleEvent>) {
         match event {
             ConsoleEvent::SetBalance(line) => {
                 state.balance = line;
-                render_balance(&mut out, &state);
+                render_status(&mut out, &state);
             }
             ConsoleEvent::SetTick(line) => {
                 state.tick = line;
-                render_tick(&mut out, &state);
+                render_status(&mut out, &state);
             }
             ConsoleEvent::Log(level, message) => {
                 render_log(&mut out, &mut state, level, &message);
@@ -151,8 +151,7 @@ async fn run_renderer(mut rx: mpsc::Receiver<ConsoleEvent>) {
 }
 
 fn render_header(out: &mut impl Write, state: &RenderState) {
-    render_balance(out, state);
-    render_tick(out, state);
+    render_status(out, state);
     render_top_border(out, state);
     let _ = execute!(out, MoveTo(0, state.log_start()));
 }
@@ -169,26 +168,34 @@ fn render_all(out: &mut impl Write, state: &RenderState) {
     render_command_panel(out, state);
 }
 
-fn render_balance(out: &mut impl Write, state: &RenderState) {
+fn render_status(out: &mut impl Write, state: &RenderState) {
     let _ = queue!(out, MoveTo(0, 0), Clear(ClearType::CurrentLine));
-    let label = "Balance:";
-    let line = format!("{} {}", label, state.balance);
-    let line = truncate_to_width(&line, state.width);
-    let _ = write!(out, "{}", line.with(Color::Cyan));
-    let _ = out.flush();
-}
-
-fn render_tick(out: &mut impl Write, state: &RenderState) {
-    let _ = queue!(out, MoveTo(0, 1), Clear(ClearType::CurrentLine));
-    let label = "Tick:";
-    let line = format!("{} {}", label, state.tick);
-    let line = truncate_to_width(&line, state.width);
-    let _ = write!(out, "{}", line.with(Color::Green));
+    let balance_label = "Balance:";
+    let tick_label = "Tick:";
+    let separator = " | ";
+    let full_line = format!(
+        "{balance_label} {}{separator}{tick_label} {}",
+        state.balance, state.tick
+    );
+    let line = truncate_to_width(&full_line, state.width);
+    if line.len() < full_line.len() {
+        let _ = write!(out, "{}", line.with(Color::Cyan));
+        let _ = out.flush();
+        return;
+    }
+    let _ = write!(
+        out,
+        "{}{}{}",
+        format!("{balance_label} {}", state.balance).with(Color::Cyan),
+        separator.with(Color::DarkGrey),
+        format!("{tick_label} {}", state.tick).with(Color::Green)
+    );
     let _ = out.flush();
 }
 
 fn render_top_border(out: &mut impl Write, state: &RenderState) {
-    let _ = queue!(out, MoveTo(0, 2), Clear(ClearType::CurrentLine));
+    let row = state.log_start().saturating_sub(1);
+    let _ = queue!(out, MoveTo(0, row), Clear(ClearType::CurrentLine));
     let width = state.width.max(1) as usize;
     if width < 2 {
         let _ = out.flush();
