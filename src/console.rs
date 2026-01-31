@@ -61,10 +61,6 @@ pub fn log_warn(message: impl Into<String>) {
     emit(ConsoleEvent::Log(LogLevel::Warn, message.into()));
 }
 
-pub fn log_error(message: impl Into<String>) {
-    emit(ConsoleEvent::Log(LogLevel::Error, message.into()));
-}
-
 fn emit(event: ConsoleEvent) {
     if let Some(handle) = CONSOLE.get() {
         let _ = handle.tx.try_send(event);
