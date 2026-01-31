@@ -14,6 +14,7 @@ use scapi::rpc::get_tick_info_with;
 use scapi::rpc::post::broadcast_transaction_with;
 use scapi::{QubicId, QubicWallet, build_ticket_tx_bytes};
 
+use crate::console;
 #[derive(Debug)]
 pub struct TransportError {
     pub message: String,
@@ -191,6 +192,14 @@ impl ScTransport for ScapiContractTransport {
         payload.extend_from_slice(&input.revealed_bits);
         payload.extend_from_slice(&input.committed_digest);
 
+        console::log_info(format!(
+            "scapi tx: build+send amount={amount} tick={tick} input_type={input_type} contract={contract_id}",
+            amount = amount,
+            tick = tick,
+            input_type = self.input_type,
+            contract_id = self.contract_id
+        ));
+
         let tx_bytes = build_ticket_tx_bytes(
             &self.wallet,
             self.contract_id,
@@ -206,9 +215,17 @@ impl ScTransport for ScapiContractTransport {
         let encoded = BASE64_STANDARD.encode(tx_bytes);
         let response = broadcast_transaction_with(&self.rpc, encoded)
             .await
-            .map_err(|err| TransportError {
-                message: format!("broadcast transaction failed: {}", err),
+            .map_err(|err| {
+                console::log_warn(format!("scapi tx: broadcast failed: {}", err));
+                TransportError {
+                    message: format!("broadcast transaction failed: {}", err),
+                }
             })?;
+
+        console::log_info(format!(
+            "scapi tx: broadcast ok tx_id={}",
+            response.transaction_id
+        ));
 
         Ok(response.transaction_id)
     }
