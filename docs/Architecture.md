@@ -39,3 +39,8 @@
 - `src/rpc/get/tick_info.rs` — текущий тик.
 - `src/rpc/get/balances.rs` — баланс пользователя.
 Использовать их в отдельных корутинах: `Tick Source` и `Balance Watcher`.
+
+
+## Notes (ASCII)
+- TickInfo uses u32 for epoch/tick/tick_duration_ms in this client.
+- QubicWallet derives identity/signature from seed (K12 + FourQ).
