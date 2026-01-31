@@ -1,14 +1,14 @@
 use clap::Parser;
 
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
-const DEFAULT_COMMIT_AMOUNT: u64 = 1000;
+const DEFAULT_COMMIT_AMOUNT: u64 = 10000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
 const DEFAULT_TX_TICK_OFFSET: u32 = 5;
 const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 100;
 const DEFAULT_PIPELINE_SLEEP_MS: u64 = 200;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
-const DEFAULT_BALANCE_INTERVAL_MS: u64 = 200;
+const DEFAULT_BALANCE_INTERVAL_MS: u64 = 1000;
 
 #[derive(Debug, Parser)]
 #[command(name = "random-client", version, about = "Random SC client")]
@@ -58,7 +58,6 @@ pub struct Config {
     pub tick_poll_interval_ms: u64,
     pub contract_id: String,
     pub endpoint: String,
-    pub persist_pending: bool,
     pub balance_interval_ms: u64,
 }
 
@@ -84,7 +83,6 @@ impl Config {
             tick_poll_interval_ms: cli.tick_poll_interval_ms,
             contract_id: cli.contract_id,
             endpoint: cli.endpoint,
-            persist_pending: cli.persist_pending,
             balance_interval_ms: cli.balance_interval_ms,
         })
     }
