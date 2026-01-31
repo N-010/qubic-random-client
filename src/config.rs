@@ -1,5 +1,7 @@
 use clap::Parser;
 
+const DEFAULT_WORKERS: usize = 3;
+
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
 const DEFAULT_COMMIT_AMOUNT: u64 = 10000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
@@ -17,7 +19,7 @@ pub struct Cli {
     #[arg(long)]
     pub seed: String,
 
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = DEFAULT_WORKERS)]
     pub workers: usize,
 
     #[arg(long, default_value_t = DEFAULT_REVEAL_DELAY_TICKS)]
