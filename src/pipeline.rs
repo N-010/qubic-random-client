@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::console;
-use crate::entropy::{commit_digest, seed_to_rng_seed, XorShift64};
+use crate::entropy::{XorShift64, commit_digest, seed_to_rng_seed};
 use crate::pipeline::state::{PendingItem, PendingState};
 use crate::protocol::RevealAndCommitInput;
 use crate::ticks::TickInfo;

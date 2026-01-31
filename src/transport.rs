@@ -6,9 +6,9 @@ use crate::balance::BalanceEntry;
 use crate::protocol::RevealAndCommitInput;
 use crate::ticks::TickInfo;
 
+use scapi::rpc::RpcClient;
 use scapi::rpc::get_balance_with;
 use scapi::rpc::get_tick_info_with;
-use scapi::rpc::RpcClient;
 
 #[derive(Debug)]
 pub struct TransportError {
@@ -108,11 +108,12 @@ impl ScapiClient for ScapiRpcClient {
             None => return Ok(Vec::new()),
         };
 
-        let response = get_balance_with(&self.rpc, identity)
-            .await
-            .map_err(|err| TransportError {
-                message: err.to_string(),
-            })?;
+        let response =
+            get_balance_with(&self.rpc, identity)
+                .await
+                .map_err(|err| TransportError {
+                    message: err.to_string(),
+                })?;
 
         let amount = response
             .balance

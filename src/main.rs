@@ -10,7 +10,7 @@ mod ticks;
 mod transport;
 mod wallet;
 
-use app::{run, AppResult};
+use app::{AppResult, run};
 use config::Config;
 
 fn main() -> AppResult<()> {

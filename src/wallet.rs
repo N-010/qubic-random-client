@@ -1,6 +1,8 @@
 use tiny_keccak::{Hasher, IntoXof, KangarooTwelve, Xof};
 
-use crate::four_q::consts::{CURVE_ORDER_0, CURVE_ORDER_1, CURVE_ORDER_2, CURVE_ORDER_3, MONTGOMERY_R_PRIME, ONE};
+use crate::four_q::consts::{
+    CURVE_ORDER_0, CURVE_ORDER_1, CURVE_ORDER_2, CURVE_ORDER_3, MONTGOMERY_R_PRIME, ONE,
+};
 use crate::four_q::ops::{
     addcarry_u64, ecc_mul_fixed, encode, montgomery_multiply_mod_order, subborrow_u64,
 };
@@ -13,8 +15,7 @@ impl QubicId {
     pub fn get_identity(&self) -> String {
         let mut identity = [0u8; 60];
         for i in 0..4 {
-            let mut fragment =
-                u64::from_le_bytes(self.0[i << 3..(i << 3) + 8].try_into().unwrap());
+            let mut fragment = u64::from_le_bytes(self.0[i << 3..(i << 3) + 8].try_into().unwrap());
             for j in 0..14 {
                 identity[i * 14 + j] = (fragment % 26) as u8 + b'A';
                 fragment /= 26;
