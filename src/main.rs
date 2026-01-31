@@ -3,7 +3,6 @@ mod balance;
 mod config;
 mod console;
 mod entropy;
-mod four_q;
 mod pipeline;
 mod protocol;
 mod ticks;
