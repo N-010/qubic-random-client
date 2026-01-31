@@ -52,7 +52,10 @@ pub async fn run(config: Config) -> AppResult<()> {
     let (tick_tx, tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
 
-    let tick_source = ScapiTickSource::new(client.clone(), Duration::from_millis(200));
+    let tick_source = ScapiTickSource::new(
+        client.clone(),
+        Duration::from_millis(config.tick_poll_interval_ms),
+    );
     tokio::spawn(tick_source.run(tick_tx));
 
     tokio::spawn(run_balance_watcher(

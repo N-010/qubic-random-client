@@ -7,7 +7,7 @@ use tokio::time::sleep;
 use crate::console;
 use crate::transport::ScapiClient;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct TickInfo {
     pub epoch: u32,
     pub tick: u32,

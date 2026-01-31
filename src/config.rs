@@ -1,14 +1,14 @@
-use std::path::PathBuf;
-
 use clap::Parser;
 
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
 const DEFAULT_COMMIT_AMOUNT: u64 = 1000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
 const DEFAULT_TX_TICK_OFFSET: u32 = 5;
+const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 100;
 const DEFAULT_PIPELINE_SLEEP_MS: u64 = 200;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
-const DEFAULT_DATA_DIR: &str = "data";
+
+const DEFAULT_BALANCE_INTERVAL_MS: u64 = 200;
 
 #[derive(Debug, Parser)]
 #[command(name = "random-client", version, about = "Random SC client")]
@@ -31,19 +31,19 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_PIPELINE_SLEEP_MS)]
     pub pipeline_sleep_ms: u64,
 
+    #[arg(long, default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS)]
+    pub tick_poll_interval_ms: u64,
+
     #[arg(long, default_value = DEFAULT_CONTRACT_ID)]
     pub contract_id: String,
 
     #[arg(long, default_value = DEFAULT_ENDPOINT)]
     pub endpoint: String,
 
-    #[arg(long, default_value = DEFAULT_DATA_DIR)]
-    pub data_dir: PathBuf,
-
     #[arg(long, default_value_t = false)]
     pub persist_pending: bool,
 
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = DEFAULT_BALANCE_INTERVAL_MS)]
     pub balance_interval_ms: u64,
 }
 
@@ -55,9 +55,9 @@ pub struct Config {
     pub tx_tick_offset: u32,
     pub commit_amount: u64,
     pub pipeline_sleep_ms: u64,
+    pub tick_poll_interval_ms: u64,
     pub contract_id: String,
     pub endpoint: String,
-    pub data_dir: PathBuf,
     pub persist_pending: bool,
     pub balance_interval_ms: u64,
 }
@@ -81,9 +81,9 @@ impl Config {
             tx_tick_offset: cli.tx_tick_offset,
             commit_amount: cli.commit_amount,
             pipeline_sleep_ms: cli.pipeline_sleep_ms,
+            tick_poll_interval_ms: cli.tick_poll_interval_ms,
             contract_id: cli.contract_id,
             endpoint: cli.endpoint,
-            data_dir: cli.data_dir,
             persist_pending: cli.persist_pending,
             balance_interval_ms: cli.balance_interval_ms,
         })
