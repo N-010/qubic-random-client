@@ -60,7 +60,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         balance_state.clone(),
     ));
 
-    let pipeline_count = runtime.pipeline_count.max(1);
+    let pipeline_count = runtime.commit_reveal_pipeline_count.max(1);
     let mut pipeline_txs = Vec::with_capacity(pipeline_count);
     for id in 0..pipeline_count {
         let (pipeline_tx, pipeline_rx) = mpsc::channel(64);
@@ -85,7 +85,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
     tokio::spawn(run_job_dispatcher(
         job_rx,
         transport.clone(),
-        runtime.workers,
+        runtime.senders,
     ));
 
     let result = wait_for_shutdown_signal().await;

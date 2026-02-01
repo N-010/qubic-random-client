@@ -57,7 +57,9 @@ impl Pipeline {
 
     fn base_tick_offset(&self) -> u32 {
         let pipeline_offset = u32::try_from(self.id).unwrap_or(u32::MAX);
-        self.config.tx_tick_offset.saturating_add(pipeline_offset)
+        self.config
+            .reveal_delay_ticks
+            .saturating_add(pipeline_offset)
     }
 
     pub async fn run(
@@ -65,7 +67,7 @@ impl Pipeline {
         mut tick_rx: mpsc::Receiver<PipelineEvent>,
         job_tx: mpsc::Sender<RevealCommitJob>,
     ) {
-        let sleep_duration = Duration::from_millis(self.config.pipeline_sleep_ms);
+        let sleep_duration = Duration::from_millis(self.config.commit_reveal_sleep_ms);
         while let Some(event) = tick_rx.recv().await {
             match event {
                 PipelineEvent::Tick(tick) => {
@@ -223,10 +225,10 @@ fn format_commit(commit: &[u8; 32]) -> String {
 pub async fn run_job_dispatcher(
     mut job_rx: mpsc::Receiver<RevealCommitJob>,
     transport: Arc<dyn ScTransport>,
-    workers: usize,
+    senders: usize,
 ) {
-    let workers = workers.max(1);
-    let semaphore = Arc::new(Semaphore::new(workers));
+    let senders = senders.max(1);
+    let semaphore = Arc::new(Semaphore::new(senders));
 
     while let Some(job) = job_rx.recv().await {
         let permit = match semaphore.clone().acquire_owned().await {
