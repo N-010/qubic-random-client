@@ -1,6 +1,9 @@
 use std::fmt;
+use std::io::Write as _;
 
+use atty::Stream;
 use clap::Parser;
+use rpassword;
 use zeroize::Zeroize;
 
 const DEFAULT_WORKERS: usize = 3;
@@ -20,7 +23,10 @@ const DEFAULT_BALANCE_INTERVAL_MS: u64 = 1000;
 #[command(name = "random-client", version, about = "Random SC client")]
 pub struct Cli {
     #[arg(long)]
-    pub seed: String,
+    pub seed: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    pub seed_stdin: bool,
 
     #[arg(long, default_value_t = DEFAULT_WORKERS)]
     pub workers: usize,
@@ -101,7 +107,17 @@ pub struct Config {
 impl AppConfig {
     pub fn from_cli() -> Result<Self, String> {
         let cli = Cli::parse();
-        let seed = Seed::new(cli.seed)?;
+        let seed_value = if cli.seed_stdin {
+            if cli.seed.is_some() {
+                return Err("use either --seed or --seed-stdin, not both".to_string());
+            }
+            read_seed_from_stdin()?
+        } else if let Some(seed) = cli.seed {
+            seed
+        } else {
+            return Err("missing seed: use --seed or --seed-stdin".to_string());
+        };
+        let seed = Seed::new(seed_value)?;
         let workers = if cli.workers == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -136,6 +152,35 @@ fn validate_seed(seed: &str) -> Result<(), String> {
         return Err("seed must contain only a-z characters".to_string());
     }
     Ok(())
+}
+
+fn read_seed_from_stdin() -> Result<String, String> {
+    let seed = if atty::is(Stream::Stdin) {
+        print!("seed: ");
+        std::io::stdout()
+            .flush()
+            .map_err(|err| format!("failed to flush stdout: {err}"))?;
+        let mut input = rpassword::read_password()
+            .map_err(|err| format!("failed to read seed from tty: {err}"))?;
+        let seed = input.trim().to_string();
+        input.zeroize();
+        seed
+    } else {
+        let mut input = String::new();
+        let bytes = std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|err| format!("failed to read seed from stdin: {err}"))?;
+        if bytes == 0 {
+            return Err("seed from stdin is empty".to_string());
+        }
+        let seed = input.trim().to_string();
+        input.zeroize();
+        seed
+    };
+    if seed.is_empty() {
+        return Err("seed from stdin is empty".to_string());
+    }
+    Ok(seed)
 }
 
 struct LockedSeed {
