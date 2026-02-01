@@ -6,7 +6,7 @@ use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::balance::run_balance_watcher;
+use crate::balance::{BalanceState, run_balance_watcher};
 use crate::config::AppConfig;
 use crate::console;
 use crate::pipeline::{Pipeline, PipelineEvent, run_job_dispatcher};
@@ -42,6 +42,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         contract_id,
         1,
     ));
+    let balance_state = Arc::new(BalanceState::new());
 
     let (tick_tx, mut tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
@@ -56,13 +57,14 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         client.clone(),
         identity,
         Duration::from_millis(runtime.balance_interval_ms),
+        balance_state.clone(),
     ));
 
     let pipeline_count = runtime.pipeline_count.max(1);
     let mut pipeline_txs = Vec::with_capacity(pipeline_count);
     for id in 0..pipeline_count {
         let (pipeline_tx, pipeline_rx) = mpsc::channel(64);
-        let pipeline = Pipeline::new(runtime.clone(), id);
+        let pipeline = Pipeline::new(runtime.clone(), id, balance_state.clone());
         tokio::spawn(pipeline.run(pipeline_rx, job_tx.clone()));
         pipeline_txs.push(pipeline_tx);
     }

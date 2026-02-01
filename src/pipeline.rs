@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 
+use crate::balance::BalanceState;
 use crate::config::Config;
 use crate::console;
 use crate::entropy::{commit_digest, fill_secure_bits};
@@ -34,6 +35,7 @@ pub struct Pipeline {
     pending: Option<PendingCommit>,
     tick: TickInfo,
     id: usize,
+    balance_state: Arc<BalanceState>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,12 +45,13 @@ struct PendingCommit {
 }
 
 impl Pipeline {
-    pub fn new(config: Config, id: usize) -> Self {
+    pub fn new(config: Config, id: usize, balance_state: Arc<BalanceState>) -> Self {
         Self {
             config,
             pending: None,
             tick: Default::default(),
             id,
+            balance_state,
         }
     }
 
@@ -70,7 +73,24 @@ impl Pipeline {
 
                     if tick.tick <= self.tick.tick {
                         // skip old tick
+                        sleep(sleep_duration).await;
+
                         continue;
+                    }
+
+                    let commit_amount = self.config.commit_amount;
+                    if commit_amount > 0 {
+                        let balance = self.balance_state.amount();
+                        if balance < commit_amount {
+                            console::log_warn(format!(
+                                "pipeline[{id}] paused: balance={balance} < amount={commit_amount}",
+                                id = self.id,
+                                balance = balance,
+                                commit_amount = commit_amount
+                            ));
+                            sleep(sleep_duration).await;
+                            continue;
+                        }
                     }
 
                     self.tick = tick.clone();
