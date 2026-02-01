@@ -25,7 +25,9 @@ pub async fn run_balance_watcher(
                 } else {
                     let mut parts = Vec::with_capacity(entries.len());
                     for entry in entries {
-                        parts.push(format!("{}={}", entry.asset, entry.amount));
+                        let asset = console::shorten_id(&entry.asset);
+                        let amount = console::format_amount(entry.amount);
+                        parts.push(format!("{asset}={amount}"));
                     }
                     console::set_balance_line(parts.join(" | "));
                 }

@@ -162,7 +162,7 @@ impl ScTransport for ScapiContractTransport {
             amount = amount,
             tick = tick,
             input_type = self.input_type,
-            contract_id = self.contract_id
+            contract_id = console::shorten_id(&self.contract_id.to_string())
         ));
 
         let tx_bytes = build_ticket_tx_bytes(
@@ -189,7 +189,7 @@ impl ScTransport for ScapiContractTransport {
 
         console::log_info(format!(
             "scapi tx: broadcast ok tx_id={}",
-            response.transaction_id
+            console::shorten_id(&response.transaction_id)
         ));
 
         Ok(response.transaction_id)
