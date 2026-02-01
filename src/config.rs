@@ -17,7 +17,7 @@ const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
 const DEFAULT_RUNTIME_THREADS: usize = 0;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
-const DEFAULT_BALANCE_INTERVAL_MS: u64 = 1000;
+const DEFAULT_BALANCE_INTERVAL_MS: u64 = 300;
 
 #[derive(Debug, Parser)]
 #[command(name = "random-client", version, about = "Random SC client")]
