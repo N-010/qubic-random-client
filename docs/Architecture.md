@@ -48,7 +48,7 @@
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
 - Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
-- CLI: seed via --seed or --seed-stdin; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
+- CLI: seed via stdin/TTY by default; --seed overrides; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
 - commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.
 
 ## Shutdown behavior (ASCII)
