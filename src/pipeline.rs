@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::time::sleep;
 
 use crate::config::Config;
@@ -12,6 +13,14 @@ use crate::entropy::{commit_digest, fill_secure_bits};
 use crate::protocol::RevealAndCommitInput;
 use crate::ticks::TickInfo;
 use crate::transport::ScTransport;
+
+#[derive(Debug)]
+pub enum PipelineEvent {
+    Tick(TickInfo),
+    Shutdown {
+        reply: oneshot::Sender<Option<RevealCommitJob>>,
+    },
+}
 
 #[derive(Debug)]
 pub struct RevealCommitJob {
@@ -45,102 +54,137 @@ impl Pipeline {
 
     pub async fn run(
         mut self,
-        mut tick_rx: mpsc::Receiver<TickInfo>,
+        mut tick_rx: mpsc::Receiver<PipelineEvent>,
         job_tx: mpsc::Sender<RevealCommitJob>,
     ) {
         let sleep_duration = Duration::from_millis(self.config.pipeline_sleep_ms);
-        while let Some(tick) = tick_rx.recv().await {
-            let reveal_delay = self.config.reveal_delay_ticks;
+        while let Some(event) = tick_rx.recv().await {
+            match event {
+                PipelineEvent::Tick(tick) => {
+                    let reveal_delay = self.config.reveal_delay_ticks;
 
-            if tick.tick <= self.tick.tick {
-                // skip old tick
-                continue;
-            }
-
-            self.tick = tick.clone();
-
-            match &self.pending {
-                None => {
-                    let scheduled_tick = tick.tick.saturating_add(self.config.tx_tick_offset);
-                    let mut revealed_bits = [0u8; 512];
-                    fill_secure_bits(&mut revealed_bits);
-                    let committed_digest = commit_digest(&revealed_bits);
-                    let commit = format_commit(&committed_digest);
-
-                    let commit_input = RevealAndCommitInput {
-                        revealed_bits: [0u8; 512],
-                        committed_digest,
-                    };
-                    let commit_job = RevealCommitJob {
-                        input: commit_input,
-                        amount: self.config.commit_amount,
-                        tick: scheduled_tick,
-                    };
-
-                    console::log_info(format!(
-                        "pipeline[{id}] commit-only: now_tick={now_tick} commit_tick={commit_tick} amount={amount} commit={commit}",
-                        id = self.id,
-                        now_tick = tick.tick,
-                        commit_tick = scheduled_tick,
-                        amount = self.config.commit_amount,
-                        commit = commit
-                    ));
-                    if job_tx.send(commit_job).await.is_err() {
-                        break;
-                    }
-
-                    self.pending = Some(PendingCommit {
-                        reveal_send_at_tick: scheduled_tick.saturating_add(reveal_delay),
-                        revealed_bits,
-                    });
-                }
-                Some(pending) => {
-                    if tick.tick < pending.reveal_send_at_tick - 2 {
-                        console::log_info(format!(
-                            "pipeline[{id}] waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
-                            id = self.id,
-                            now_tick = tick.tick,
-                            reveal_send_at_tick = pending.reveal_send_at_tick,
-                        ));
+                    if tick.tick <= self.tick.tick {
+                        // skip old tick
                         continue;
                     }
 
-                    let next_reveal_tick = pending.reveal_send_at_tick.saturating_add(reveal_delay);
-                    let mut next_bits = [0u8; 512];
-                    fill_secure_bits(&mut next_bits);
-                    let next_digest = commit_digest(&next_bits);
-                    let commit = format_commit(&next_digest);
+                    self.tick = tick.clone();
 
-                    let reveal_input = RevealAndCommitInput {
-                        revealed_bits: pending.revealed_bits,
-                        committed_digest: next_digest,
-                    };
-                    let reveal_job = RevealCommitJob {
-                        input: reveal_input,
-                        amount: self.config.commit_amount,
-                        tick: pending.reveal_send_at_tick,
-                    };
+                    match &self.pending {
+                        None => {
+                            let scheduled_tick =
+                                tick.tick.saturating_add(self.config.tx_tick_offset);
+                            let mut revealed_bits = [0u8; 512];
+                            fill_secure_bits(&mut revealed_bits);
+                            let committed_digest = commit_digest(&revealed_bits);
+                            let commit = format_commit(&committed_digest);
 
-                    console::log_info(format!(
-                        "pipeline[{id}] reveal+commit: now_tick={now_tick} next_reveal_tick={next_reveal_tick} amount={amount} commit={commit}",
-                        id = self.id,
-                        now_tick = tick.tick,
-                        next_reveal_tick = next_reveal_tick,
-                        amount = self.config.commit_amount,
-                        commit = commit
-                    ));
-                    if job_tx.send(reveal_job).await.is_err() {
-                        break;
+                            let commit_input = RevealAndCommitInput {
+                                revealed_bits: [0u8; 512],
+                                committed_digest,
+                            };
+                            let commit_job = RevealCommitJob {
+                                input: commit_input,
+                                amount: self.config.commit_amount,
+                                tick: scheduled_tick,
+                            };
+
+                            console::log_info(format!(
+                                "pipeline[{id}] commit-only: now_tick={now_tick} commit_tick={commit_tick} amount={amount} commit={commit}",
+                                id = self.id,
+                                now_tick = tick.tick,
+                                commit_tick = scheduled_tick,
+                                amount = self.config.commit_amount,
+                                commit = commit
+                            ));
+                            if job_tx.send(commit_job).await.is_err() {
+                                break;
+                            }
+
+                            self.pending = Some(PendingCommit {
+                                reveal_send_at_tick: scheduled_tick.saturating_add(reveal_delay),
+                                revealed_bits,
+                            });
+                        }
+                        Some(pending) => {
+                            if tick.tick < pending.reveal_send_at_tick - 2 {
+                                console::log_info(format!(
+                                    "pipeline[{id}] waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
+                                    id = self.id,
+                                    now_tick = tick.tick,
+                                    reveal_send_at_tick = pending.reveal_send_at_tick,
+                                ));
+                                continue;
+                            }
+
+                            let next_reveal_tick =
+                                pending.reveal_send_at_tick.saturating_add(reveal_delay);
+                            let mut next_bits = [0u8; 512];
+                            fill_secure_bits(&mut next_bits);
+                            let next_digest = commit_digest(&next_bits);
+                            let commit = format_commit(&next_digest);
+
+                            let reveal_input = RevealAndCommitInput {
+                                revealed_bits: pending.revealed_bits,
+                                committed_digest: next_digest,
+                            };
+                            let reveal_job = RevealCommitJob {
+                                input: reveal_input,
+                                amount: self.config.commit_amount,
+                                tick: pending.reveal_send_at_tick,
+                            };
+
+                            console::log_info(format!(
+                                "pipeline[{id}] reveal+commit: now_tick={now_tick} next_reveal_tick={next_reveal_tick} amount={amount} commit={commit}",
+                                id = self.id,
+                                now_tick = tick.tick,
+                                next_reveal_tick = next_reveal_tick,
+                                amount = self.config.commit_amount,
+                                commit = commit
+                            ));
+                            if job_tx.send(reveal_job).await.is_err() {
+                                break;
+                            }
+
+                            self.pending = Some(PendingCommit {
+                                reveal_send_at_tick: next_reveal_tick,
+                                revealed_bits: next_bits,
+                            });
+                        }
                     }
 
-                    self.pending = Some(PendingCommit {
-                        reveal_send_at_tick: next_reveal_tick,
-                        revealed_bits: next_bits,
+                    sleep(sleep_duration).await;
+                }
+                PipelineEvent::Shutdown { reply } => {
+                    let shutdown_job = self.pending.take().map(|pending| {
+                        let current_tick =
+                            self.tick.tick.saturating_add(self.config.tx_tick_offset);
+                        let reveal_tick = current_tick.max(pending.reveal_send_at_tick);
+                        let committed_digest = commit_digest(&pending.revealed_bits);
+                        let commit = format_commit(&committed_digest);
+                        let reveal_input = RevealAndCommitInput {
+                            revealed_bits: pending.revealed_bits,
+                            committed_digest,
+                        };
+                        let reveal_job = RevealCommitJob {
+                            input: reveal_input,
+                            amount: 0,
+                            tick: reveal_tick,
+                        };
+
+                        console::log_info(format!(
+                            "pipeline[{id}] shutdown reveal: now_tick={now_tick} reveal_tick={reveal_tick} amount=0 commit={commit}",
+                            id = self.id,
+                            now_tick = self.tick.tick,
+                            reveal_tick = reveal_tick,
+                            commit = commit
+                        ));
+                        reveal_job
                     });
+                    let _ = reply.send(shutdown_job);
+                    break;
                 }
             }
-
-            sleep(sleep_duration).await;
         }
     }
 }
