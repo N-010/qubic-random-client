@@ -52,6 +52,11 @@ impl Pipeline {
         }
     }
 
+    fn base_tick_offset(&self) -> u32 {
+        let pipeline_offset = u32::try_from(self.id).unwrap_or(u32::MAX);
+        self.config.tx_tick_offset.saturating_add(pipeline_offset)
+    }
+
     pub async fn run(
         mut self,
         mut tick_rx: mpsc::Receiver<PipelineEvent>,
@@ -72,8 +77,7 @@ impl Pipeline {
 
                     match &self.pending {
                         None => {
-                            let scheduled_tick =
-                                tick.tick.saturating_add(self.config.tx_tick_offset);
+                            let scheduled_tick = tick.tick.saturating_add(self.base_tick_offset());
                             let mut revealed_bits = [0u8; 512];
                             fill_secure_bits(&mut revealed_bits);
                             let committed_digest = commit_digest(&revealed_bits);
@@ -157,8 +161,7 @@ impl Pipeline {
                 }
                 PipelineEvent::Shutdown { reply } => {
                     let shutdown_job = self.pending.take().map(|pending| {
-                        let current_tick =
-                            self.tick.tick.saturating_add(self.config.tx_tick_offset);
+                        let current_tick = self.tick.tick.saturating_add(self.base_tick_offset());
                         let reveal_tick = current_tick.max(pending.reveal_send_at_tick);
                         let committed_digest = commit_digest(&pending.revealed_bits);
                         let commit = format_commit(&committed_digest);
