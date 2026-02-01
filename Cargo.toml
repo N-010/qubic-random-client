@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-scapi = { git = "https://github.com/N-010/scapi", version = "0.2.5" }
+scapi = { git = "https://github.com/N-010/scapi", version = "0.2.5", rev = "0978a0b47350373e45f4f7442dc2cf9c78241bb2" }
 async-trait = "0.1"
+atty = "0.2"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 rand_core = "0.6.4"
+rpassword = "7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tiny-keccak = { version = "2", features = ["k12"] }
 zeroize = "1"

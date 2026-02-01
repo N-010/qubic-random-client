@@ -111,7 +111,7 @@ impl Pipeline {
                             });
                         }
                         Some(pending) => {
-                            if tick.tick < pending.reveal_send_at_tick - 2 {
+                            if tick.tick < pending.reveal_send_at_tick.saturating_sub(2) {
                                 console::log_info(format!(
                                     "pipeline[{id}] waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
                                     id = self.id,
