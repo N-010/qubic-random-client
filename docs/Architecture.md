@@ -28,7 +28,9 @@
 - Каждая транзакция: Reveal для pending + новый Commit.
 
 ### Ключевые типы/трейты
-- `Config`: `workers`, `seed`, `reveal_delay_ticks`, `tx_tick_offset`, `commit_amount`, `pipeline_sleep_ms`, `contract_id`, `endpoint`, `data_dir`, `persist_pending`.
+- `AppConfig`: `seed`, `runtime: Config`.
+- `Seed`: locked in-memory buffer, zeroized on drop.
+- `Config`: `workers`, `reveal_delay_ticks`, `tx_tick_offset`, `commit_amount`, `pipeline_sleep_ms`, `contract_id`, `endpoint`, `persist_pending`.
 - `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
@@ -44,6 +46,7 @@
 ## Notes (ASCII)
 - TickInfo uses u32 for epoch/tick/tick_duration_ms in this client.
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
+- Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
 - CLI: --seed required; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
 - commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.

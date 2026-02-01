@@ -9,10 +9,10 @@ mod ticks;
 mod transport;
 
 use app::{AppResult, run};
-use config::Config;
+use config::AppConfig;
 
 fn main() -> AppResult<()> {
-    let config = Config::from_cli().map_err(|err| {
+    let config = AppConfig::from_cli().map_err(|err| {
         eprintln!("config error: {}", err);
         err
     })?;
