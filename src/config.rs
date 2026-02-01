@@ -1,4 +1,7 @@
+use std::fmt;
+
 use clap::Parser;
+use zeroize::Zeroize;
 
 const DEFAULT_WORKERS: usize = 3;
 
@@ -53,9 +56,36 @@ pub struct Cli {
     pub balance_interval_ms: u64,
 }
 
+pub struct Seed(LockedSeed);
+
+impl Seed {
+    fn new(mut seed: String) -> Result<Self, String> {
+        if let Err(err) = validate_seed(&seed) {
+            seed.zeroize();
+            return Err(err);
+        }
+        LockedSeed::new(seed).map(Self)
+    }
+
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for Seed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Seed(REDACTED)")
+    }
+}
+
+#[derive(Debug)]
+pub struct AppConfig {
+    pub seed: Seed,
+    pub runtime: Config,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub seed: String,
     pub workers: usize,
     pub reveal_delay_ticks: u32,
     pub tx_tick_offset: u32,
@@ -68,10 +98,10 @@ pub struct Config {
     pub balance_interval_ms: u64,
 }
 
-impl Config {
+impl AppConfig {
     pub fn from_cli() -> Result<Self, String> {
         let cli = Cli::parse();
-        validate_seed(&cli.seed)?;
+        let seed = Seed::new(cli.seed)?;
         let workers = if cli.workers == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -81,17 +111,19 @@ impl Config {
         };
 
         Ok(Self {
-            seed: cli.seed,
-            workers,
-            reveal_delay_ticks: cli.reveal_delay_ticks,
-            tx_tick_offset: cli.tx_tick_offset,
-            commit_amount: cli.commit_amount,
-            pipeline_sleep_ms: cli.pipeline_sleep_ms,
-            pipeline_count: cli.pipeline_count,
-            tick_poll_interval_ms: cli.tick_poll_interval_ms,
-            contract_id: cli.contract_id,
-            endpoint: cli.endpoint,
-            balance_interval_ms: cli.balance_interval_ms,
+            seed,
+            runtime: Config {
+                workers,
+                reveal_delay_ticks: cli.reveal_delay_ticks,
+                tx_tick_offset: cli.tx_tick_offset,
+                commit_amount: cli.commit_amount,
+                pipeline_sleep_ms: cli.pipeline_sleep_ms,
+                pipeline_count: cli.pipeline_count,
+                tick_poll_interval_ms: cli.tick_poll_interval_ms,
+                contract_id: cli.contract_id,
+                endpoint: cli.endpoint,
+                balance_interval_ms: cli.balance_interval_ms,
+            },
         })
     }
 }
@@ -105,3 +137,75 @@ fn validate_seed(seed: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+struct LockedSeed {
+    bytes: Vec<u8>,
+}
+
+impl LockedSeed {
+    fn new(seed: String) -> Result<Self, String> {
+        let bytes = seed.into_bytes();
+        if let Err(err) = lock_bytes(&bytes) {
+            let mut bytes = bytes;
+            bytes.zeroize();
+            return Err(err);
+        }
+        Ok(Self { bytes })
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes).expect("seed must be validated as lowercase ascii")
+    }
+}
+
+impl Drop for LockedSeed {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+        unlock_bytes(&self.bytes);
+    }
+}
+
+#[cfg(unix)]
+fn lock_bytes(bytes: &[u8]) -> Result<(), String> {
+    let result = unsafe { libc::mlock(bytes.as_ptr().cast(), bytes.len()) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(format!("mlock failed: {}", std::io::Error::last_os_error()))
+    }
+}
+
+#[cfg(unix)]
+fn unlock_bytes(bytes: &[u8]) {
+    let _ = unsafe { libc::munlock(bytes.as_ptr().cast(), bytes.len()) };
+}
+
+#[cfg(windows)]
+fn lock_bytes(bytes: &[u8]) -> Result<(), String> {
+    let result = unsafe {
+        windows_sys::Win32::System::Memory::VirtualLock(bytes.as_ptr().cast(), bytes.len())
+    };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "VirtualLock failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn unlock_bytes(bytes: &[u8]) {
+    let _ = unsafe {
+        windows_sys::Win32::System::Memory::VirtualUnlock(bytes.as_ptr().cast(), bytes.len())
+    };
+}
+
+#[cfg(not(any(unix, windows)))]
+fn lock_bytes(_bytes: &[u8]) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unlock_bytes(_bytes: &[u8]) {}
