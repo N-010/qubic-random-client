@@ -11,7 +11,6 @@ use crate::transport::ScapiClient;
 pub struct TickInfo {
     pub epoch: u32,
     pub tick: u32,
-    pub tick_duration_ms: u32,
 }
 
 pub struct ScapiTickSource {

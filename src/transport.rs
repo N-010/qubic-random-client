@@ -69,7 +69,6 @@ impl ScapiClient for ScapiRpcClient {
         Ok(TickInfo {
             epoch: info.epoch,
             tick: info.tick,
-            tick_duration_ms: info.duration,
         })
     }
 
