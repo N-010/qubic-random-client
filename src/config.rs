@@ -25,9 +25,6 @@ pub struct Cli {
     #[arg(long)]
     pub seed: Option<String>,
 
-    #[arg(long, default_value_t = false)]
-    pub seed_stdin: bool,
-
     #[arg(long, default_value_t = DEFAULT_SENDERS)]
     pub senders: usize,
 
@@ -104,15 +101,10 @@ pub struct Config {
 impl AppConfig {
     pub fn from_cli() -> Result<Self, String> {
         let cli = Cli::parse();
-        let seed_value = if cli.seed_stdin {
-            if cli.seed.is_some() {
-                return Err("use either --seed or --seed-stdin, not both".to_string());
-            }
-            read_seed_from_stdin()?
-        } else if let Some(seed) = cli.seed {
+        let seed_value = if let Some(seed) = cli.seed {
             seed
         } else {
-            return Err("missing seed: use --seed or --seed-stdin".to_string());
+            read_seed_from_stdin()?
         };
         let seed = Seed::new(seed_value)?;
         let senders = if cli.senders == 0 {
