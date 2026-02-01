@@ -6,15 +6,15 @@ use clap::Parser;
 use rpassword;
 use zeroize::Zeroize;
 
-const DEFAULT_WORKERS: usize = 3;
+const DEFAULT_SENDERS: usize = 3;
 
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
 const DEFAULT_COMMIT_AMOUNT: u64 = 10_000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
-const DEFAULT_TX_TICK_OFFSET: u32 = 5;
 const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 50;
-const DEFAULT_PIPELINE_SLEEP_MS: u64 = 200;
-const DEFAULT_PIPELINE_COUNT: usize = 3;
+const DEFAULT_COMMIT_REVEAL_SLEEP_MS: u64 = 200;
+const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
+const DEFAULT_RUNTIME_THREADS: usize = 0;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
 const DEFAULT_BALANCE_INTERVAL_MS: u64 = 1000;
@@ -28,23 +28,23 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub seed_stdin: bool,
 
-    #[arg(long, default_value_t = DEFAULT_WORKERS)]
-    pub workers: usize,
+    #[arg(long, default_value_t = DEFAULT_SENDERS)]
+    pub senders: usize,
 
     #[arg(long, default_value_t = DEFAULT_REVEAL_DELAY_TICKS)]
     pub reveal_delay_ticks: u32,
 
-    #[arg(long, default_value_t = DEFAULT_TX_TICK_OFFSET)]
-    pub tx_tick_offset: u32,
-
     #[arg(long, default_value_t = DEFAULT_COMMIT_AMOUNT)]
     pub commit_amount: u64,
 
-    #[arg(long, default_value_t = DEFAULT_PIPELINE_SLEEP_MS)]
-    pub pipeline_sleep_ms: u64,
+    #[arg(long, default_value_t = DEFAULT_COMMIT_REVEAL_SLEEP_MS)]
+    pub commit_reveal_sleep_ms: u64,
 
-    #[arg(long, default_value_t = DEFAULT_PIPELINE_COUNT)]
-    pub pipeline_count: usize,
+    #[arg(long, default_value_t = DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT)]
+    pub commit_reveal_pipeline_count: usize,
+
+    #[arg(long, default_value_t = DEFAULT_RUNTIME_THREADS)]
+    pub runtime_threads: usize,
 
     #[arg(long, default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS)]
     pub tick_poll_interval_ms: u64,
@@ -54,9 +54,6 @@ pub struct Cli {
 
     #[arg(long, default_value = DEFAULT_ENDPOINT)]
     pub endpoint: String,
-
-    #[arg(long, default_value_t = false)]
-    pub persist_pending: bool,
 
     #[arg(long, default_value_t = DEFAULT_BALANCE_INTERVAL_MS)]
     pub balance_interval_ms: u64,
@@ -92,12 +89,12 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub workers: usize,
+    pub senders: usize,
     pub reveal_delay_ticks: u32,
-    pub tx_tick_offset: u32,
     pub commit_amount: u64,
-    pub pipeline_sleep_ms: u64,
-    pub pipeline_count: usize,
+    pub commit_reveal_sleep_ms: u64,
+    pub commit_reveal_pipeline_count: usize,
+    pub runtime_threads: usize,
     pub tick_poll_interval_ms: u64,
     pub contract_id: String,
     pub endpoint: String,
@@ -118,23 +115,30 @@ impl AppConfig {
             return Err("missing seed: use --seed or --seed-stdin".to_string());
         };
         let seed = Seed::new(seed_value)?;
-        let workers = if cli.workers == 0 {
+        let senders = if cli.senders == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
         } else {
-            cli.workers
+            cli.senders
+        };
+        let runtime_threads = if cli.runtime_threads == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        } else {
+            cli.runtime_threads
         };
 
         Ok(Self {
             seed,
             runtime: Config {
-                workers,
+                senders,
                 reveal_delay_ticks: cli.reveal_delay_ticks,
-                tx_tick_offset: cli.tx_tick_offset,
                 commit_amount: cli.commit_amount,
-                pipeline_sleep_ms: cli.pipeline_sleep_ms,
-                pipeline_count: cli.pipeline_count,
+                commit_reveal_sleep_ms: cli.commit_reveal_sleep_ms,
+                commit_reveal_pipeline_count: cli.commit_reveal_pipeline_count,
+                runtime_threads,
                 tick_poll_interval_ms: cli.tick_poll_interval_ms,
                 contract_id: cli.contract_id,
                 endpoint: cli.endpoint,

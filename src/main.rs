@@ -18,6 +18,7 @@ fn main() -> AppResult<()> {
     })?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.runtime.runtime_threads)
         .enable_all()
         .build()?;
 

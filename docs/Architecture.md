@@ -6,7 +6,7 @@
 - **Pipeline Commit → Pending → Reveal**: очередь pending, раскрытие через `+3` тика, пул корутин для отправки Reveal/Commit.
 - **Balance Watcher**: отдельная корутина периодически выводит баланс пользователя.
 - **SC Transport (абстракция)**: отправка `RevealAndCommit` в контракт.
-- **State/Storage**: in-memory + опциональная персистенция pending.
+- **State/Storage**: in-memory.
 
 ## Техническая
 ### Структура модулей
@@ -30,7 +30,7 @@
 ### Ключевые типы/трейты
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
-- `Config`: `workers`, `reveal_delay_ticks`, `tx_tick_offset`, `commit_amount`, `pipeline_sleep_ms`, `contract_id`, `endpoint`, `persist_pending`.
+- `Config`: `senders`, `reveal_delay_ticks`, `commit_amount`, `commit_reveal_sleep_ms`, `commit_reveal_pipeline_count`, `runtime_threads`, `contract_id`, `endpoint`, `balance_interval_ms`.
 - `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
@@ -48,11 +48,11 @@
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
 - Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
-- CLI: --seed required; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
+- CLI: seed via --seed or --seed-stdin; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
 - commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.
 
 ## Shutdown behavior (ASCII)
 - On shutdown, if there is a pending commit waiting to be revealed, the pipeline returns a self-reveal job to the main task.
-- The main task sends this reveal synchronously before exit (not via background workers) to avoid Ctrl-C races.
+- The main task sends this reveal synchronously before exit (not via background senders) to avoid Ctrl-C races.
 - This shutdown reveal uses amount=0 and sets committed_digest = K12(revealed_bits), so it does not create a new paid commit.
-- The shutdown reveal tick is max(pending.reveal_send_at_tick, current_tick + tx_tick_offset) to avoid using an outdated tick.
+- The shutdown reveal tick is max(pending.reveal_send_at_tick, current_tick + reveal_delay_ticks) to avoid using an outdated tick.
