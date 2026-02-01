@@ -47,3 +47,9 @@
 
 - CLI: --seed required; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
 - commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.
+
+## Shutdown behavior (ASCII)
+- On shutdown, if there is a pending commit waiting to be revealed, the pipeline returns a self-reveal job to the main task.
+- The main task sends this reveal synchronously before exit (not via background workers) to avoid Ctrl-C races.
+- This shutdown reveal uses amount=0 and sets committed_digest = K12(revealed_bits), so it does not create a new paid commit.
+- The shutdown reveal tick is max(pending.reveal_send_at_tick, current_tick + tx_tick_offset) to avoid using an outdated tick.

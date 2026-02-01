@@ -1,22 +1,47 @@
 use std::collections::VecDeque;
-use std::io::{Write, stdout};
-use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::{self, Stdout};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
-use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::style::{Color, Stylize};
-use crossterm::terminal::{self, Clear, ClearType};
-use crossterm::{execute, queue};
-use tokio::sync::mpsc;
+use crossterm::cursor;
+use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Terminal;
 
-const HEADER_LINES: u16 = 2;
-const COMMAND_HINT: &str = "Commands: Ctrl+C to exit";
+const LOG_CAPACITY: usize = 500;
+const REFRESH_INTERVAL_MS: u64 = 250;
 
 #[derive(Clone, Copy)]
 enum LogLevel {
     Info,
     Warn,
-    Error,
+}
+
+struct LogEntry {
+    level: LogLevel,
+    message: String,
+}
+
+struct ConsoleState {
+    balance: String,
+    tick: String,
+    logs: VecDeque<LogEntry>,
+}
+
+impl ConsoleState {
+    fn new() -> Self {
+        Self {
+            balance: String::new(),
+            tick: String::new(),
+            logs: VecDeque::with_capacity(LOG_CAPACITY),
+        }
+    }
 }
 
 enum ConsoleEvent {
@@ -26,387 +51,187 @@ enum ConsoleEvent {
     Shutdown,
 }
 
-#[derive(Clone)]
-pub struct ConsoleHandle {
+struct ConsoleRuntime {
     tx: mpsc::Sender<ConsoleEvent>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
-static CONSOLE: OnceLock<ConsoleHandle> = OnceLock::new();
+static CONSOLE: OnceLock<ConsoleRuntime> = OnceLock::new();
 
 pub fn init() {
     if CONSOLE.get().is_some() {
         return;
     }
-    let (tx, rx) = mpsc::channel(256);
-    let handle = ConsoleHandle { tx };
-    let _ = CONSOLE.set(handle);
-    tokio::spawn(run_renderer(rx));
-    set_balance_line("waiting for balance");
-    set_tick_line("waiting for tick");
+
+    let (tx, rx) = mpsc::channel();
+    let join = thread::spawn(move || run_console(rx));
+    let _ = CONSOLE.set(ConsoleRuntime {
+        tx: tx.clone(),
+        join: Mutex::new(Some(join)),
+    });
+
+    log_info("console initialized");
 }
 
 pub fn set_balance_line(line: impl Into<String>) {
-    emit(ConsoleEvent::SetBalance(line.into()));
+    let _ = send_event(ConsoleEvent::SetBalance(line.into()));
 }
 
 pub fn set_tick_line(line: impl Into<String>) {
-    emit(ConsoleEvent::SetTick(line.into()));
+    let _ = send_event(ConsoleEvent::SetTick(line.into()));
 }
 
 pub fn log_info(message: impl Into<String>) {
-    emit(ConsoleEvent::Log(LogLevel::Info, message.into()));
+    let message = message.into();
+    if send_event(ConsoleEvent::Log(LogLevel::Info, message.clone())).is_err() {
+        println!("[INFO] {}", message);
+    }
 }
 
 pub fn log_warn(message: impl Into<String>) {
-    emit(ConsoleEvent::Log(LogLevel::Warn, message.into()));
-}
-
-fn emit(event: ConsoleEvent) {
-    if let Some(handle) = CONSOLE.get() {
-        let _ = handle.tx.try_send(event);
+    let message = message.into();
+    if send_event(ConsoleEvent::Log(LogLevel::Warn, message.clone())).is_err() {
+        println!("[WARN] {}", message);
     }
 }
 
-struct RenderState {
-    balance: String,
-    tick: String,
-    logs: VecDeque<LogEntry>,
-    width: u16,
-    height: u16,
-}
-
-impl RenderState {
-    fn new() -> Self {
-        let (width, height) = terminal::size().unwrap_or((80, 24));
-        Self {
-            balance: String::new(),
-            tick: String::new(),
-            logs: VecDeque::new(),
-            width,
-            height,
-        }
-    }
-
-    fn refresh_size(&mut self) -> bool {
-        let (width, height) = terminal::size().unwrap_or((80, 24));
-        if self.width == width && self.height == height {
-            return false;
-        }
-        self.width = width;
-        self.height = height;
-        true
-    }
-
-    fn log_start(&self) -> u16 {
-        HEADER_LINES.min(self.height.saturating_sub(1))
-    }
-
-    fn command_row(&self) -> u16 {
-        self.height.saturating_sub(1)
-    }
-
-    fn bottom_border_row(&self) -> u16 {
-        self.command_row().saturating_sub(1)
-    }
-
-    fn log_bottom(&self) -> u16 {
-        self.bottom_border_row().saturating_sub(1)
-    }
-}
-
-async fn run_renderer(mut rx: mpsc::Receiver<ConsoleEvent>) {
-    let mut out = stdout();
-    let mut state = RenderState::new();
-    let _ = execute!(out, Clear(ClearType::All), Hide);
-    render_all(&mut out, &state);
-
-    while let Some(event) = rx.recv().await {
-        if state.refresh_size() {
-            let _ = execute!(out, Clear(ClearType::All));
-            render_all(&mut out, &state);
-        }
-        match event {
-            ConsoleEvent::SetBalance(line) => {
-                state.balance = line;
-                render_status(&mut out, &state);
-            }
-            ConsoleEvent::SetTick(line) => {
-                state.tick = line;
-                render_status(&mut out, &state);
-            }
-            ConsoleEvent::Log(level, message) => {
-                render_log(&mut out, &mut state, level, &message);
-            }
-            ConsoleEvent::Shutdown => {
-                break;
+pub async fn shutdown() {
+    if let Some(runtime) = CONSOLE.get() {
+        let _ = runtime.tx.send(ConsoleEvent::Shutdown);
+        if let Ok(mut join) = runtime.join.lock() {
+            if let Some(handle) = join.take() {
+                let _ = handle.join();
             }
         }
     }
-
-    let _ = execute!(out, Show, MoveTo(0, state.command_row()));
 }
 
-fn render_header(out: &mut impl Write, state: &RenderState) {
-    render_status(out, state);
-    render_top_border(out, state);
-    let _ = execute!(out, MoveTo(0, state.log_start()));
-}
-
-fn render_all(out: &mut impl Write, state: &RenderState) {
-    render_header(out, state);
-    let start = state.log_start();
-    let bottom = state.log_bottom();
-    if bottom >= start {
-        let capacity = bottom.saturating_sub(start).saturating_add(1) as usize;
-        render_logs(out, state, start, capacity);
-    }
-    render_bottom_border(out, state);
-    render_command_panel(out, state);
-}
-
-fn render_status(out: &mut impl Write, state: &RenderState) {
-    let _ = queue!(out, MoveTo(0, 0), Clear(ClearType::CurrentLine));
-    let balance_label = "Balance:";
-    let tick_label = "Tick:";
-    let separator = " | ";
-    let full_line = format!(
-        "{balance_label} {}{separator}{tick_label} {}",
-        state.balance, state.tick
-    );
-    let line = truncate_to_width(&full_line, state.width);
-    if line.len() < full_line.len() {
-        let _ = write!(out, "{}", line.with(Color::Cyan));
-        let _ = out.flush();
-        return;
-    }
-    let _ = write!(
-        out,
-        "{}{}{}",
-        format!("{balance_label} {}", state.balance).with(Color::Cyan),
-        separator.with(Color::DarkGrey),
-        format!("{tick_label} {}", state.tick).with(Color::Green)
-    );
-    let _ = out.flush();
-}
-
-fn render_top_border(out: &mut impl Write, state: &RenderState) {
-    let row = state.log_start().saturating_sub(1);
-    let _ = queue!(out, MoveTo(0, row), Clear(ClearType::CurrentLine));
-    let width = state.width.max(1) as usize;
-    if width < 2 {
-        let _ = out.flush();
-        return;
-    }
-    let inner = width - 2;
-    let label = " LOGS ";
-    let label_start = if inner > label.len() {
-        (inner - label.len()) / 2
+fn send_event(event: ConsoleEvent) -> Result<(), ()> {
+    if let Some(runtime) = CONSOLE.get() {
+        runtime.tx.send(event).map_err(|_| ())
     } else {
-        0
-    };
-    let label_end = (label_start + label.len()).min(inner);
-
-    let _ = write!(out, "+");
-    if label_start > 0 {
-        let _ = write!(out, "{}", "-".repeat(label_start).with(Color::DarkGrey));
+        Err(())
     }
-    if label_end > label_start {
-        let label_slice = &label[..label_end - label_start];
-        let _ = write!(out, "{}", label_slice.with(Color::Cyan));
-    }
-    if inner > label_end {
-        let _ = write!(
-            out,
-            "{}",
-            "-".repeat(inner - label_end).with(Color::DarkGrey)
-        );
-    }
-    let _ = write!(out, "+");
-    let _ = out.flush();
 }
 
-fn render_log(out: &mut impl Write, state: &mut RenderState, level: LogLevel, message: &str) {
-    let start = state.log_start();
-    let bottom = state.log_bottom();
-    let capacity = bottom.saturating_sub(start).saturating_add(1) as usize;
-    if capacity == 0 {
-        return;
+fn run_console(rx: mpsc::Receiver<ConsoleEvent>) {
+    let mut state = ConsoleState::new();
+    let mut terminal = match setup_terminal() {
+        Ok(terminal) => terminal,
+        Err(_) => return,
+    };
+
+    loop {
+        match rx.recv_timeout(Duration::from_millis(REFRESH_INTERVAL_MS)) {
+            Ok(event) => {
+                if handle_event(event, &mut state) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if terminal.draw(|frame| draw_ui(frame, &state)).is_err() {
+            break;
+        }
     }
 
-    state
-        .logs
-        .push_back(LogEntry::new(level, message.to_string()));
-    while state.logs.len() > capacity {
+    restore_terminal(&mut terminal);
+}
+
+fn handle_event(event: ConsoleEvent, state: &mut ConsoleState) -> bool {
+    match event {
+        ConsoleEvent::SetBalance(line) => {
+            state.balance = line;
+        }
+        ConsoleEvent::SetTick(line) => {
+            state.tick = line;
+        }
+        ConsoleEvent::Log(level, message) => push_log(state, level, message),
+        ConsoleEvent::Shutdown => return true,
+    }
+
+    false
+}
+
+fn push_log(state: &mut ConsoleState, level: LogLevel, message: String) {
+    if state.logs.len() >= LOG_CAPACITY {
         state.logs.pop_front();
     }
-    render_logs(out, state, start, capacity);
+    state.logs.push_back(LogEntry { level, message });
 }
 
-struct LogEntry {
-    level: LogLevel,
-    message: String,
-    timestamp: SystemTime,
+fn draw_ui(frame: &mut ratatui::Frame<'_>, state: &ConsoleState) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(frame.area());
+
+    let header = Paragraph::new(header_line(state));
+    frame.render_widget(header, layout[0]);
+
+    let log_lines = log_lines(state, layout[1].height.saturating_sub(2) as usize);
+    let log = Paragraph::new(Text::from(log_lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Log")
+                .title_alignment(ratatui::layout::Alignment::Left),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(log, layout[1]);
 }
 
-impl LogEntry {
-    fn new(level: LogLevel, message: String) -> Self {
-        Self {
-            level,
-            message,
-            timestamp: SystemTime::now(),
-        }
+fn header_line(state: &ConsoleState) -> Line<'static> {
+    let label_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    Line::from(vec![
+        Span::styled("Tick: ", label_style),
+        Span::raw(state.tick.clone()),
+        Span::raw(" | "),
+        Span::styled("Balance: ", label_style),
+        Span::raw(state.balance.clone()),
+    ])
+}
+
+fn log_lines(state: &ConsoleState, max_lines: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    if max_lines == 0 {
+        return lines;
     }
-}
 
-fn render_logs(out: &mut impl Write, state: &RenderState, start: u16, capacity: usize) {
-    for index in 0..capacity {
-        let row = start.saturating_add(index as u16);
-        let _ = queue!(out, MoveTo(0, row), Clear(ClearType::CurrentLine));
-        render_log_row(out, state, index);
-    }
-    let _ = out.flush();
-}
-
-fn render_log_row(out: &mut impl Write, state: &RenderState, index: usize) {
-    let width = state.width as usize;
-    if width < 2 {
-        return;
-    }
-    let inner = width - 2;
-    let _ = write!(out, "|");
-    if let Some(entry) = state.logs.get(index) {
-        let (tag, color) = match entry.level {
-            LogLevel::Info => ("INFO", Color::White),
-            LogLevel::Warn => ("WARN", Color::Yellow),
-            LogLevel::Error => ("ERROR", Color::Red),
+    let start = state.logs.len().saturating_sub(max_lines);
+    for entry in state.logs.iter().skip(start) {
+        let (label, style) = match entry.level {
+            LogLevel::Info => ("[INFO] ", Style::default()),
+            LogLevel::Warn => ("[WARN] ", Style::default().fg(Color::Yellow)),
         };
-        let timestamp = format_timestamp(entry.timestamp);
-        let prefix = format!("[{}] [{}] ", timestamp, tag);
-        let available = inner.saturating_sub(prefix.len());
-        let message = truncate_message(&entry.message, available);
-        let padding = inner.saturating_sub(prefix.len() + message.len());
-        let message_color = log_message_color(&entry.message);
-        let _ = write!(
-            out,
-            "[{}] [{}] ",
-            timestamp.with(Color::DarkGrey),
-            tag.with(color),
-        );
-        if let Some(color) = message_color {
-            let _ = write!(out, "{}", message.with(color));
-        } else {
-            let _ = write!(out, "{}", message);
-        }
-        if padding > 0 {
-            let _ = write!(out, "{}", " ".repeat(padding));
-        }
-    } else {
-        let _ = write!(out, "{}", " ".repeat(inner));
-    }
-    let _ = write!(out, "|");
-}
 
-fn render_bottom_border(out: &mut impl Write, state: &RenderState) {
-    let row = state.bottom_border_row();
-    let _ = queue!(out, MoveTo(0, row), Clear(ClearType::CurrentLine));
-    let width = state.width.max(1) as usize;
-    if width < 2 {
-        let _ = out.flush();
-        return;
-    }
-    let inner = width - 2;
-    let _ = write!(out, "+{}+", "-".repeat(inner).with(Color::DarkGrey));
-    let _ = out.flush();
-}
-
-fn render_command_panel(out: &mut impl Write, state: &RenderState) {
-    let row = state.command_row();
-    let _ = queue!(out, MoveTo(0, row), Clear(ClearType::CurrentLine));
-    let line = truncate_to_width(COMMAND_HINT, state.width);
-    let _ = write!(out, "{}", line.with(Color::DarkGrey));
-    let _ = out.flush();
-}
-
-fn truncate_to_width(value: &str, width: u16) -> String {
-    let max = width as usize;
-    if max == 0 || value.len() <= max {
-        return value.to_string();
-    }
-    let keep = max.saturating_sub(3);
-    let mut out = String::with_capacity(max);
-    out.push_str(&value.chars().take(keep).collect::<String>());
-    out.push_str("...");
-    out
-}
-
-fn truncate_message(value: &str, max: usize) -> String {
-    if max == 0 || value.len() <= max {
-        return value.to_string();
-    }
-    let keep = max.saturating_sub(3);
-    let mut out = String::with_capacity(max);
-    out.push_str(&value.chars().take(keep).collect::<String>());
-    out.push_str("...");
-    out
-}
-
-fn log_message_color(message: &str) -> Option<Color> {
-    if message.starts_with("pipeline") {
-        return Some(Color::Cyan);
-    }
-    if message.starts_with("scapi") {
-        return Some(Color::Magenta);
-    }
-    None
-}
-
-fn format_timestamp(time: SystemTime) -> String {
-    let dur = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let total_secs = dur.as_secs();
-    let secs = (total_secs % 60) as u32;
-    let mins = ((total_secs / 60) % 60) as u32;
-    let hours = ((total_secs / 3600) % 24) as u32;
-    let days = total_secs / 86_400;
-
-    let (year, month, day) = date_from_days(days);
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        year, month, day, hours, mins, secs
-    )
-}
-
-fn date_from_days(mut days: u64) -> (u32, u32, u32) {
-    let mut year: u32 = 1970;
-    loop {
-        let leap = is_leap_year(year);
-        let year_days = if leap { 366 } else { 365 };
-        if days < year_days {
-            break;
-        }
-        days -= year_days;
-        year += 1;
+        lines.push(Line::from(vec![
+            Span::styled(label, style),
+            Span::styled(entry.message.clone(), style),
+        ]));
     }
 
-    let month_days = if is_leap_year(year) {
-        [31u32, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31u32, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month: u32 = 1;
-    let mut remaining = days as u32;
-    for md in month_days {
-        if remaining < md {
-            break;
-        }
-        remaining -= md;
-        month += 1;
-    }
-
-    let day = remaining + 1;
-    (year, month, day)
+    lines
 }
 
-fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+    Ok(terminal)
+}
+
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
+    let _ = terminal.show_cursor();
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, LeaveAlternateScreen, cursor::Show);
 }
