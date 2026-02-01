@@ -78,7 +78,11 @@ pub async fn run(config: Config) -> AppResult<()> {
         }
     });
 
-    tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), config.workers));
+    tokio::spawn(run_job_dispatcher(
+        job_rx,
+        transport.clone(),
+        config.workers,
+    ));
 
     let result = wait_for_shutdown_signal().await;
     shutdown_pipelines(&pipeline_txs, transport.clone()).await;
@@ -134,7 +138,7 @@ async fn wait_for_shutdown_signal() -> AppResult<()> {
 
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         let mut sigint = signal(SignalKind::interrupt())?;
         let mut sigterm = signal(SignalKind::terminate())?;

@@ -36,10 +36,7 @@ impl ScapiTickSource {
                     let key = (info.epoch, info.tick);
                     if self.last != Some(key) {
                         self.last = Some(key);
-                        console::set_tick_line(format!(
-                            "epoch={} tick={} duration={}ms",
-                            info.epoch, info.tick, info.tick_duration_ms
-                        ));
+                        console::set_tick_line(format!("{}", info.tick));
                         if tx.send(info).await.is_err() {
                             break;
                         }
