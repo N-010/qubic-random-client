@@ -14,6 +14,7 @@ const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 50;
 const DEFAULT_COMMIT_REVEAL_SLEEP_MS: u64 = 200;
 const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
 const DEFAULT_RUNTIME_THREADS: usize = 0;
+const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 0;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
 const DEFAULT_BALANCE_INTERVAL_MS: u64 = 300;
@@ -41,6 +42,15 @@ pub struct Cli {
 
     #[arg(long, default_value_t = DEFAULT_RUNTIME_THREADS)]
     pub runtime_threads: usize,
+
+    #[arg(long)]
+    pub heap_dump: bool,
+
+    #[arg(long)]
+    pub heap_stats: bool,
+
+    #[arg(long, default_value_t = DEFAULT_HEAP_DUMP_INTERVAL_SECS)]
+    pub heap_dump_interval_secs: u64,
 
     #[arg(long, default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS)]
     pub tick_poll_interval_ms: u64,
@@ -91,6 +101,9 @@ pub struct Config {
     pub commit_reveal_sleep_ms: u64,
     pub commit_reveal_pipeline_count: usize,
     pub runtime_threads: usize,
+    pub heap_dump: bool,
+    pub heap_stats: bool,
+    pub heap_dump_interval_secs: u64,
     pub tick_poll_interval_ms: u64,
     pub contract_id: String,
     pub endpoint: String,
@@ -130,6 +143,9 @@ impl AppConfig {
                 commit_reveal_sleep_ms: cli.commit_reveal_sleep_ms,
                 commit_reveal_pipeline_count: cli.commit_reveal_pipeline_count,
                 runtime_threads,
+                heap_dump: cli.heap_dump,
+                heap_stats: cli.heap_stats,
+                heap_dump_interval_secs: cli.heap_dump_interval_secs,
                 tick_poll_interval_ms: cli.tick_poll_interval_ms,
                 contract_id: cli.contract_id,
                 endpoint: cli.endpoint,
@@ -305,6 +321,9 @@ mod tests {
             commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 1,
+            heap_dump: false,
+            heap_stats: false,
+            heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 10,
             contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),
@@ -325,6 +344,9 @@ mod tests {
             commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 1,
+            heap_dump: false,
+            heap_stats: false,
+            heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 10,
             contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),
@@ -361,6 +383,9 @@ mod tests {
             commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 0,
+            heap_dump: false,
+            heap_stats: false,
+            heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 10,
             contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),
