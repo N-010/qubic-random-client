@@ -16,26 +16,31 @@ use crate::transport::{ScTransport, ScapiClient, ScapiContractTransport, ScapiRp
 
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
+
 pub async fn run(config: AppConfig) -> AppResult<()> {
     console::init();
     let AppConfig { seed, runtime } = config;
     let scapi_wallet = wallet_from_seed(seed.expose())?;
     drop(seed);
-    let contract_id = contract_id_from_str(&runtime.contract_id)?;
+    let contract_id = default_contract_id()?;
     let identity = scapi_wallet.get_identity();
 
+    let balance_state = Arc::new(BalanceState::new());
     let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(runtime.endpoint.clone()));
     let transport: Arc<dyn ScTransport> = Arc::new(ScapiContractTransport::new(
         runtime.endpoint.clone(),
         scapi_wallet,
         contract_id,
         1,
+        balance_state.clone(),
     ));
     run_with_components(
         runtime,
         identity,
         client,
         transport,
+        balance_state,
         wait_for_shutdown_signal(),
     )
     .await
@@ -46,9 +51,9 @@ async fn run_with_components(
     identity: String,
     client: Arc<dyn ScapiClient>,
     transport: Arc<dyn ScTransport>,
+    balance_state: Arc<BalanceState>,
     shutdown: impl std::future::Future<Output = AppResult<()>>,
 ) -> AppResult<()> {
-    let balance_state = Arc::new(BalanceState::new());
     let (tick_tx, mut tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
 
@@ -180,16 +185,16 @@ fn wallet_from_seed(seed: &str) -> AppResult<ScapiQubicWallet> {
     })
 }
 
-fn contract_id_from_str(contract_id: &str) -> AppResult<ScapiQubicId> {
-    ScapiQubicId::from_str(contract_id).map_err(|err| {
-        console::log_warn(format!("invalid contract id: {}", err));
+fn default_contract_id() -> AppResult<ScapiQubicId> {
+    ScapiQubicId::from_str(DEFAULT_CONTRACT_ID).map_err(|err| {
+        console::log_warn(format!("invalid default contract id: {}", err));
         std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into()
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{contract_id_from_str, run_with_components, shutdown_pipelines, wallet_from_seed};
+    use super::{run_with_components, shutdown_pipelines, wallet_from_seed};
     use crate::balance::BalanceEntry;
     use crate::pipeline::PipelineEvent;
     use crate::protocol::RevealAndCommitInput;
@@ -260,12 +265,6 @@ mod tests {
         assert!(!err.to_string().is_empty());
     }
 
-    #[test]
-    fn contract_id_from_str_rejects_invalid() {
-        // Invalid contract id string should fail parsing.
-        let _err = contract_id_from_str("invalid").expect_err("expected error");
-    }
-
     #[tokio::test]
     async fn run_with_components_starts_pipeline_and_dispatch() {
         // With a tick source and balance, at least one transport send should happen.
@@ -331,7 +330,6 @@ mod tests {
             heap_stats: false,
             heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 1,
-            contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 1,
         };
@@ -342,8 +340,16 @@ mod tests {
             Ok(())
         };
 
-        run_with_components(runtime, "identity".to_string(), client, transport, shutdown)
-            .await
-            .expect("run");
+        let balance_state = Arc::new(crate::balance::BalanceState::new());
+        run_with_components(
+            runtime,
+            "identity".to_string(),
+            client,
+            transport,
+            balance_state,
+            shutdown,
+        )
+        .await
+        .expect("run");
     }
 }

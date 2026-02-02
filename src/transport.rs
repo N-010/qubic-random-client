@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
-use crate::balance::BalanceEntry;
+use crate::balance::{BalanceEntry, BalanceState};
 use crate::protocol::RevealAndCommitInput;
 use crate::ticks::TickInfo;
 
@@ -101,7 +102,7 @@ pub struct ScapiContractTransport {
     contract_id: QubicId,
     input_type: u16,
     wallet: QubicWallet,
-    identity: String,
+    balance_state: Arc<BalanceState>,
 }
 
 impl ScapiContractTransport {
@@ -110,15 +111,15 @@ impl ScapiContractTransport {
         wallet: QubicWallet,
         contract_id: QubicId,
         input_type: u16,
+        balance_state: Arc<BalanceState>,
     ) -> Self {
         let rpc = RpcClient::with_base_url(Cow::Owned(base_url));
-        let identity = wallet.public_key.get_identity();
         Self {
             rpc,
             contract_id,
             input_type,
             wallet,
-            identity,
+            balance_state,
         }
     }
 }
@@ -154,19 +155,7 @@ impl ScTransport for ScapiContractTransport {
         tick: u32,
     ) -> Result<String, TransportError> {
         if amount > 0 {
-            let response = get_balance_with(&self.rpc, &self.identity)
-                .await
-                .map_err(|err| TransportError {
-                    message: format!("failed to fetch balance: {}", err),
-                })?;
-            let balance =
-                response
-                    .balance
-                    .balance
-                    .parse::<u64>()
-                    .map_err(|err| TransportError {
-                        message: format!("invalid balance value: {}", err),
-                    })?;
+            let balance = self.balance_state.amount();
             if balance < amount {
                 return Err(TransportError {
                     message: format!("insufficient balance: have {} need {}", balance, amount),
@@ -218,6 +207,7 @@ mod tests {
         ScTransport, ScapiClient, ScapiContractTransport, ScapiRpcClient, build_payload,
         build_tx_bytes,
     };
+    use crate::balance::BalanceState;
     use crate::protocol::RevealAndCommitInput;
     use scapi::{QubicId, QubicWallet};
     use std::collections::HashMap;
@@ -480,21 +470,18 @@ mod tests {
         // Balance below amount should fail.
         let seed = "a".repeat(55);
         let wallet = QubicWallet::from_seed(&seed).expect("wallet");
-        let identity = wallet.public_key.get_identity();
         let contract_id =
             QubicId::from_str("DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG")
                 .expect("contract");
-
-        let responses = Arc::new(Mutex::new(HashMap::from([(
-            ("GET".to_string(), format!("/balances/{}", identity)),
-            MockResponse {
-                status: 200,
-                body: r#"{"balance":{"id":"ID","balance":"0","validForTick":1,"latestIncomingTransferTick":2,"latestOutgoingTransferTick":3}}"#
-                    .to_string(),
-            },
-        )])));
-        let server = MockServer::start(responses);
-        let transport = ScapiContractTransport::new(server.base_url(), wallet, contract_id, 1);
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(0);
+        let transport = ScapiContractTransport::new(
+            "http://127.0.0.1:0".to_string(),
+            wallet,
+            contract_id,
+            1,
+            balance_state,
+        );
 
         let input = RevealAndCommitInput {
             revealed_bits: [0u8; 512],
@@ -508,65 +495,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scapi_contract_transport_fails_on_balance_fetch_error() {
-        // RPC error while fetching balance should fail.
+    async fn scapi_contract_transport_fails_on_broadcast_error() {
+        // Broadcast endpoint errors should surface.
         let seed = "a".repeat(55);
         let wallet = QubicWallet::from_seed(&seed).expect("wallet");
-        let identity = wallet.public_key.get_identity();
         let contract_id =
             QubicId::from_str("DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG")
                 .expect("contract");
 
         let responses = Arc::new(Mutex::new(HashMap::from([(
-            ("GET".to_string(), format!("/balances/{}", identity)),
+            ("POST".to_string(), "/broadcast-transaction".to_string()),
             MockResponse {
                 status: 500,
                 body: "boom".to_string(),
             },
         )])));
         let server = MockServer::start(responses);
-        let transport = ScapiContractTransport::new(server.base_url(), wallet, contract_id, 1);
-
-        let input = RevealAndCommitInput {
-            revealed_bits: [0u8; 512],
-            committed_digest: [0u8; 32],
-        };
-        let err = transport
-            .send_reveal_and_commit(input, 1, 10)
-            .await
-            .expect_err("expected error");
-        assert!(err.message.contains("failed to fetch balance"));
-    }
-
-    #[tokio::test]
-    async fn scapi_contract_transport_fails_on_broadcast_error() {
-        // Broadcast endpoint errors should surface.
-        let seed = "a".repeat(55);
-        let wallet = QubicWallet::from_seed(&seed).expect("wallet");
-        let identity = wallet.public_key.get_identity();
-        let contract_id =
-            QubicId::from_str("DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG")
-                .expect("contract");
-
-        let responses = Arc::new(Mutex::new(HashMap::from([
-            (
-                ("GET".to_string(), format!("/balances/{}", identity)),
-                MockResponse {
-                    status: 200,
-                    body: r#"{"balance":{"id":"ID","balance":"100","validForTick":1,"latestIncomingTransferTick":2,"latestOutgoingTransferTick":3}}"#
-                        .to_string(),
-                },
-            ),
-            (
-                ("POST".to_string(), "/broadcast-transaction".to_string()),
-                MockResponse {
-                    status: 500,
-                    body: "boom".to_string(),
-                },
-            ),
-        ])));
-        let server = MockServer::start(responses);
-        let transport = ScapiContractTransport::new(server.base_url(), wallet, contract_id, 1);
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let transport =
+            ScapiContractTransport::new(server.base_url(), wallet, contract_id, 1, balance_state);
 
         let input = RevealAndCommitInput {
             revealed_bits: [0u8; 512],
@@ -584,31 +532,24 @@ mod tests {
         // Successful balance check and broadcast returns tx id.
         let seed = "a".repeat(55);
         let wallet = QubicWallet::from_seed(&seed).expect("wallet");
-        let identity = wallet.public_key.get_identity();
         let contract_id =
             QubicId::from_str("DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG")
                 .expect("contract");
 
-        let responses = Arc::new(Mutex::new(HashMap::from([
-            (
-                ("GET".to_string(), format!("/balances/{}", identity)),
-                MockResponse {
-                    status: 200,
-                    body: r#"{"balance":{"id":"ID","balance":"100","validForTick":1,"latestIncomingTransferTick":2,"latestOutgoingTransferTick":3}}"#
+        let responses = Arc::new(Mutex::new(HashMap::from([(
+            ("POST".to_string(), "/broadcast-transaction".to_string()),
+            MockResponse {
+                status: 200,
+                body:
+                    r#"{"peersBroadcasted":1,"encodedTransaction":"AAA","transactionId":"tx123"}"#
                         .to_string(),
-                },
-            ),
-            (
-                ("POST".to_string(), "/broadcast-transaction".to_string()),
-                MockResponse {
-                    status: 200,
-                    body: r#"{"peersBroadcasted":1,"encodedTransaction":"AAA","transactionId":"tx123"}"#
-                        .to_string(),
-                },
-            ),
-        ])));
+            },
+        )])));
         let server = MockServer::start(responses);
-        let transport = ScapiContractTransport::new(server.base_url(), wallet, contract_id, 1);
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let transport =
+            ScapiContractTransport::new(server.base_url(), wallet, contract_id, 1, balance_state);
 
         let input = RevealAndCommitInput {
             revealed_bits: [0u8; 512],

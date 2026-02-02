@@ -36,15 +36,14 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 --seed <STRING>                Seed (55 chars a-z). If not provided, reads from stdin/TTY
 --senders <N>                  Number of transaction senders (default 3; 0 = auto)
 --reveal-delay-ticks <N>       Reveal delay relative to commit (default 3)
+--reveal-send-guard-ticks <N>  Guard ticks before reveal send (default 5)
 --commit-amount <N>            Deposit/stake amount (default 10000)
---commit-reveal-sleep-ms <N>   Sleep between commit/reveal iterations (default 200)
 --commit-reveal-pipeline-count <N> Number of parallel commit/reveal pipelines (default 3)
 --runtime-threads <N>          Tokio worker threads (default 0 = auto)
 --heap-dump                    Trigger a jemalloc heap profile dump at startup
 --heap-stats                   Print allocator stats on shutdown (Ctrl+C)
 --heap-dump-interval-secs <N>  Periodic heap dump interval in seconds (0 = disabled)
---tick-poll-interval-ms <N>    Tick poll interval (default 50)
---contract-id <ID>             Contract ID (default DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG)
+--tick-poll-interval-ms <N>    Tick poll interval (default 300)
 --endpoint <URL>               RPC endpoint (default https://rpc.qubic.org/live/v1/)
 --balance-interval-ms <N>      Balance print interval (default 300)
 ```
