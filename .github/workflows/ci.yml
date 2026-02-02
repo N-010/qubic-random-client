@@ -63,12 +63,11 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
-      # Кладём бинарник в dist/ под уникальным именем (чтобы не перетирались ассеты)
       - name: Collect binary (linux/macos)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          BIN="myapp"  # <-- имя бинарника
+          BIN="RandomClient"
           OUT="dist/${BIN}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}"
           cp "target/release/$BIN" "$OUT"
           chmod +x "$OUT"
@@ -82,7 +81,6 @@ jobs:
           $out = "dist\myapp-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}.exe"
           Copy-Item "target\release\$bin" $out
 
-      # (опционально) checksums рядом
       - name: Checksums (linux/macos)
         if: runner.os != 'Windows'
         run: |
