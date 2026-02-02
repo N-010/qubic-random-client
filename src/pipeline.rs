@@ -247,3 +247,603 @@ pub async fn run_job_dispatcher(
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Pipeline, PipelineEvent, RevealCommitJob, format_commit, run_job_dispatcher};
+    use crate::balance::BalanceState;
+    use crate::config::Config;
+    use crate::protocol::RevealAndCommitInput;
+    use crate::transport::{ScTransport, TransportError};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+    use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+
+    fn test_config() -> Config {
+        Config {
+            senders: 1,
+            reveal_delay_ticks: 3,
+            commit_amount: 10,
+            commit_reveal_sleep_ms: 0,
+            commit_reveal_pipeline_count: 1,
+            runtime_threads: 1,
+            tick_poll_interval_ms: 1,
+            contract_id: "id".to_string(),
+            endpoint: "http://localhost".to_string(),
+            balance_interval_ms: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_emits_commit_only_job() {
+        // First tick creates a commit-only job with empty reveal.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let pipeline = Pipeline::new(config.clone(), 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let job = timeout(Duration::from_millis(50), job_rx.recv())
+            .await
+            .expect("job timeout")
+            .expect("job");
+
+        assert_eq!(job.amount, config.commit_amount);
+        assert_eq!(job.tick, 13);
+        assert!(job.input.revealed_bits.iter().all(|b| *b == 0));
+        assert!(job.input.committed_digest.iter().any(|b| *b != 0));
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_emits_reveal_and_commit_job() {
+        // Second relevant tick reveals previous bits and commits new ones.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let pipeline = Pipeline::new(config.clone(), 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let _ = timeout(Duration::from_millis(50), job_rx.recv())
+            .await
+            .expect("commit job timeout")
+            .expect("commit job");
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 14,
+            }))
+            .await
+            .expect("send tick");
+        let job = timeout(Duration::from_millis(50), job_rx.recv())
+            .await
+            .expect("reveal job timeout")
+            .expect("reveal job");
+
+        assert_eq!(job.amount, config.commit_amount);
+        assert_eq!(job.tick, 16);
+        assert!(job.input.committed_digest.iter().any(|b| *b != 0));
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_pauses_on_low_balance() {
+        // If balance < amount, no job should be emitted.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(0);
+        let pipeline = Pipeline::new(config, 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let result = timeout(Duration::from_millis(20), job_rx.recv()).await;
+        assert!(result.is_err());
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_shutdown_returns_reveal_job() {
+        // Shutdown returns a pending reveal with amount=0.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let pipeline = Pipeline::new(config.clone(), 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let _ = timeout(Duration::from_millis(50), job_rx.recv())
+            .await
+            .expect("commit job timeout")
+            .expect("commit job");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await
+            .expect("send shutdown");
+        let job = reply_rx.await.expect("reply");
+        let job = job.expect("shutdown job");
+
+        assert_eq!(job.amount, 0);
+        assert_eq!(job.tick, 16);
+
+        handle.abort();
+    }
+
+    #[test]
+    fn format_commit_outputs_hex() {
+        // 32 bytes should produce 64 hex chars.
+        let commit = [0xAB; 32];
+        let out = format_commit(&commit);
+        assert_eq!(out, "ab".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn pipeline_ignores_old_ticks() {
+        // Ticks older than the last seen should be ignored.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let pipeline = Pipeline::new(config.clone(), 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let _ = timeout(Duration::from_millis(50), job_rx.recv())
+            .await
+            .expect("job timeout")
+            .expect("job");
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 9,
+            }))
+            .await
+            .expect("send old tick");
+        let result = timeout(Duration::from_millis(20), job_rx.recv()).await;
+        assert!(result.is_err());
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_skips_balance_check_when_amount_zero() {
+        // commit_amount=0 disables balance checks and still emits a job.
+        let mut config = test_config();
+        config.commit_amount = 0;
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(0);
+        let pipeline = Pipeline::new(config, 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let job = timeout(Duration::from_millis(50), job_rx.recv())
+            .await
+            .expect("job timeout")
+            .expect("job");
+        assert_eq!(job.amount, 0);
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_offset_includes_pipeline_id() {
+        // base_tick_offset = reveal_delay + pipeline id.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let pipeline = Pipeline::new(config.clone(), 2, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let job = timeout(Duration::from_millis(50), job_rx.recv())
+            .await
+            .expect("job timeout")
+            .expect("job");
+
+        assert_eq!(job.tick, 15);
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_shutdown_without_pending_returns_none() {
+        // If no pending commit exists, shutdown returns None.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        let pipeline = Pipeline::new(config, 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(4);
+        let (job_tx, _job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tick_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await
+            .expect("shutdown");
+        let job = reply_rx.await.expect("reply");
+        assert!(job.is_none());
+        handle.abort();
+    }
+
+    #[derive(Debug)]
+    struct MockTransport {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        hold: Arc<Semaphore>,
+        started_tx: mpsc::Sender<()>,
+    }
+
+    impl MockTransport {
+        fn new(hold: Arc<Semaphore>, started_tx: mpsc::Sender<()>) -> Self {
+            Self {
+                active: AtomicUsize::new(0),
+                max_active: AtomicUsize::new(0),
+                hold,
+                started_tx,
+            }
+        }
+
+        fn max_active(&self) -> usize {
+            self.max_active.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl ScTransport for MockTransport {
+        async fn send_reveal_and_commit(
+            &self,
+            _input: RevealAndCommitInput,
+            _amount: u64,
+            _tick: u32,
+        ) -> Result<String, TransportError> {
+            let active = self.active.fetch_add(1, Ordering::Relaxed) + 1;
+            self.max_active.fetch_max(active, Ordering::Relaxed);
+            let _ = self.started_tx.send(()).await;
+            let _permit = self.hold.acquire().await.expect("permit");
+            self.active.fetch_sub(1, Ordering::Relaxed);
+            Ok("tx".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn job_dispatcher_respects_sender_limit() {
+        // Semaphore enforces max in-flight sends.
+        let (job_tx, job_rx) = mpsc::channel(4);
+        let (started_tx, mut started_rx) = mpsc::channel(4);
+        let hold = Arc::new(Semaphore::new(0));
+        let transport = Arc::new(MockTransport::new(hold.clone(), started_tx));
+
+        let dispatcher = tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1));
+
+        for tick in [1u32, 2u32] {
+            let job = RevealCommitJob {
+                input: RevealAndCommitInput {
+                    revealed_bits: [0u8; 512],
+                    committed_digest: [0u8; 32],
+                },
+                amount: 1,
+                tick,
+            };
+            job_tx.send(job).await.expect("send job");
+        }
+
+        timeout(Duration::from_millis(50), started_rx.recv())
+            .await
+            .expect("first start timeout")
+            .expect("first start");
+
+        let second_start = timeout(Duration::from_millis(20), started_rx.recv()).await;
+        assert!(second_start.is_err());
+
+        hold.add_permits(1);
+
+        timeout(Duration::from_millis(50), started_rx.recv())
+            .await
+            .expect("second start timeout")
+            .expect("second start");
+
+        hold.add_permits(1);
+        drop(job_tx);
+        let _ = dispatcher.await;
+
+        assert_eq!(transport.max_active(), 1);
+    }
+
+    #[tokio::test]
+    async fn job_dispatcher_defaults_to_one_sender() {
+        // senders=0 should behave like senders=1.
+        let (job_tx, job_rx) = mpsc::channel(4);
+        let (started_tx, mut started_rx) = mpsc::channel(4);
+        let hold = Arc::new(Semaphore::new(0));
+        let transport = Arc::new(MockTransport::new(hold.clone(), started_tx));
+
+        let dispatcher = tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 0));
+
+        let job = RevealCommitJob {
+            input: RevealAndCommitInput {
+                revealed_bits: [0u8; 512],
+                committed_digest: [0u8; 32],
+            },
+            amount: 1,
+            tick: 1,
+        };
+        job_tx.send(job).await.expect("send job");
+
+        timeout(Duration::from_millis(50), started_rx.recv())
+            .await
+            .expect("start timeout")
+            .expect("start");
+
+        hold.add_permits(1);
+        drop(job_tx);
+        let _ = dispatcher.await;
+
+        assert_eq!(transport.max_active(), 1);
+    }
+
+    #[tokio::test]
+    async fn job_dispatcher_continues_after_error() {
+        // Errors from transport shouldn't stop processing remaining jobs.
+        #[derive(Debug, Default)]
+        struct ErrorTransport {
+            started: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ScTransport for ErrorTransport {
+            async fn send_reveal_and_commit(
+                &self,
+                _input: RevealAndCommitInput,
+                _amount: u64,
+                _tick: u32,
+            ) -> Result<String, TransportError> {
+                self.started.fetch_add(1, Ordering::Relaxed);
+                Err(TransportError {
+                    message: "boom".to_string(),
+                })
+            }
+        }
+
+        let (job_tx, job_rx) = mpsc::channel(4);
+        let transport = Arc::new(ErrorTransport::default());
+        let dispatcher = tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1));
+
+        for tick in [1u32, 2u32] {
+            let job = RevealCommitJob {
+                input: RevealAndCommitInput {
+                    revealed_bits: [0u8; 512],
+                    committed_digest: [0u8; 32],
+                },
+                amount: 1,
+                tick,
+            };
+            job_tx.send(job).await.expect("send job");
+        }
+        drop(job_tx);
+        let _ = dispatcher.await;
+
+        assert_eq!(transport.started.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn e2e_commit_then_reveal_cycle() {
+        // Full cycle: commit-only then reveal+commit jobs reach transport.
+        let config = test_config();
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+
+        let pipeline = Pipeline::new(config.clone(), 0, balance_state);
+        let (tick_tx, tick_rx) = mpsc::channel(8);
+        let (job_tx, job_rx) = mpsc::channel(8);
+
+        #[derive(Debug, Default)]
+        struct RecordingTransport {
+            calls: std::sync::Mutex<Vec<(u64, u32)>>,
+        }
+
+        #[async_trait]
+        impl ScTransport for RecordingTransport {
+            async fn send_reveal_and_commit(
+                &self,
+                _input: RevealAndCommitInput,
+                amount: u64,
+                tick: u32,
+            ) -> Result<String, TransportError> {
+                self.calls.lock().expect("lock calls").push((amount, tick));
+                Ok("tx".to_string())
+            }
+        }
+
+        let transport = Arc::new(RecordingTransport::default());
+        let dispatcher = tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1));
+        let pipeline_handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 14,
+            }))
+            .await
+            .expect("send tick");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        drop(tick_tx);
+        pipeline_handle.abort();
+        dispatcher.abort();
+
+        let calls = transport.calls.lock().expect("lock calls").clone();
+        assert!(calls.contains(&(10, 13)));
+        assert!(calls.contains(&(10, 16)));
+    }
+
+    #[tokio::test]
+    async fn e2e_pause_and_resume_on_balance() {
+        // Low balance pauses, then resume when balance increases.
+        let mut config = test_config();
+        config.commit_amount = 10;
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(0);
+
+        let pipeline = Pipeline::new(config, 0, balance_state.clone());
+        let (tick_tx, tick_rx) = mpsc::channel(8);
+        let (job_tx, job_rx) = mpsc::channel(8);
+
+        #[derive(Debug, Default)]
+        struct RecordingTransport {
+            calls: std::sync::Mutex<Vec<(u64, u32)>>,
+        }
+
+        #[async_trait]
+        impl ScTransport for RecordingTransport {
+            async fn send_reveal_and_commit(
+                &self,
+                _input: RevealAndCommitInput,
+                amount: u64,
+                tick: u32,
+            ) -> Result<String, TransportError> {
+                self.calls.lock().expect("lock calls").push((amount, tick));
+                Ok("tx".to_string())
+            }
+        }
+
+        let transport = Arc::new(RecordingTransport::default());
+        let dispatcher = tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1));
+        let pipeline_handle = tokio::spawn(pipeline.run(tick_rx, job_tx));
+
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+            }))
+            .await
+            .expect("send tick");
+        let no_job = timeout(Duration::from_millis(20), async {
+            loop {
+                if !transport.calls.lock().expect("lock calls").is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(no_job.is_err());
+
+        balance_state.set_amount(20);
+        tick_tx
+            .send(PipelineEvent::Tick(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 11,
+            }))
+            .await
+            .expect("send tick");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        drop(tick_tx);
+        pipeline_handle.abort();
+        dispatcher.abort();
+
+        let calls = transport.calls.lock().expect("lock calls").clone();
+        assert!(!calls.is_empty());
+    }
+}
