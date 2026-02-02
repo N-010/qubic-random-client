@@ -7,14 +7,13 @@ use zeroize::Zeroize;
 
 const DEFAULT_SENDERS: usize = 3;
 
-const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
 const DEFAULT_COMMIT_AMOUNT: u64 = 10_000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
 const DEFAULT_REVEAL_SEND_GUARD_TICKS: u32 = 5;
 const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 300;
 const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
 const DEFAULT_RUNTIME_THREADS: usize = 0;
-const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 0;
+const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 10;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
 const DEFAULT_BALANCE_INTERVAL_MS: u64 = 300;
@@ -54,9 +53,6 @@ pub struct Cli {
 
     #[arg(long, default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS)]
     pub tick_poll_interval_ms: u64,
-
-    #[arg(long, default_value = DEFAULT_CONTRACT_ID)]
-    pub contract_id: String,
 
     #[arg(long, default_value = DEFAULT_ENDPOINT)]
     pub endpoint: String,
@@ -105,7 +101,6 @@ pub struct Config {
     pub heap_stats: bool,
     pub heap_dump_interval_secs: u64,
     pub tick_poll_interval_ms: u64,
-    pub contract_id: String,
     pub endpoint: String,
     pub balance_interval_ms: u64,
 }
@@ -147,7 +142,6 @@ impl AppConfig {
                 heap_stats: cli.heap_stats,
                 heap_dump_interval_secs: cli.heap_dump_interval_secs,
                 tick_poll_interval_ms: cli.tick_poll_interval_ms,
-                contract_id: cli.contract_id,
                 endpoint: cli.endpoint,
                 balance_interval_ms: cli.balance_interval_ms,
             },
@@ -325,7 +319,6 @@ mod tests {
             heap_stats: false,
             heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 10,
-            contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
         };
@@ -348,7 +341,6 @@ mod tests {
             heap_stats: false,
             heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 10,
-            contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
         };
@@ -387,7 +379,6 @@ mod tests {
             heap_stats: false,
             heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 10,
-            contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
         };

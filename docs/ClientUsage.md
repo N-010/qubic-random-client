@@ -36,15 +36,14 @@ cargo run
 --seed <STRING>                Seed (55 символов a-z); если не указан, читается из stdin/TTY
 --senders <N>                  Параллельные отправители Reveal/Commit: больше = быстрее отправка и выше нагрузка; 0 = авто (по ядрам)
 --reveal-delay-ticks <N>       Сколько тиков ждать между commit и reveal (по умолчанию 3)
+--reveal-send-guard-ticks <N>  На сколько тиков раньше планового reveal можно отправлять (по умолчанию 5)
 --commit-amount <N>            Сумма депозита/ставки в каждой транзакции; влияет на риск и награду
---commit-reveal-sleep-ms <N>   Пауза между итерациями commit/reveal (мс); снижает нагрузку на CPU
 --commit-reveal-pipeline-count <N> Количество параллельных pipeline commit/reveal (цепочек commit→reveal)
 --runtime-threads <N>          Потоки Tokio для выполнения задач: больше = выше параллельность и нагрузка; 0 = авто (по числу логических ядер)
 --heap-dump                    Снять heap-профиль jemalloc при старте
 --heap-stats                   Печатать статистику аллокатора при завершении (Ctrl+C)
 --heap-dump-interval-secs <N>  Интервал периодических heap-дампов в секундах (0 = отключено)
 --tick-poll-interval-ms <N>    Как часто опрашивать текущий тик (мс)
---contract-id <ID>             ID смарт-контракта Random, куда отправляются транзакции
 --endpoint <URL>               RPC endpoint для запросов и отправки транзакций
 --balance-interval-ms <N>      Интервал запроса баланса (мс)
 ```
