@@ -10,6 +10,7 @@ const DEFAULT_SENDERS: usize = 3;
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
 const DEFAULT_COMMIT_AMOUNT: u64 = 10_000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
+const DEFAULT_REVEAL_SEND_GUARD_TICKS: u32 = 2;
 const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 50;
 const DEFAULT_COMMIT_REVEAL_SLEEP_MS: u64 = 200;
 const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
@@ -30,6 +31,9 @@ pub struct Cli {
 
     #[arg(long, default_value_t = DEFAULT_REVEAL_DELAY_TICKS)]
     pub reveal_delay_ticks: u32,
+
+    #[arg(long, default_value_t = DEFAULT_REVEAL_SEND_GUARD_TICKS)]
+    pub reveal_send_guard_ticks: u32,
 
     #[arg(long, default_value_t = DEFAULT_COMMIT_AMOUNT)]
     pub commit_amount: u64,
@@ -97,6 +101,7 @@ pub struct AppConfig {
 pub struct Config {
     pub senders: usize,
     pub reveal_delay_ticks: u32,
+    pub reveal_send_guard_ticks: u32,
     pub commit_amount: u64,
     pub commit_reveal_sleep_ms: u64,
     pub commit_reveal_pipeline_count: usize,
@@ -139,6 +144,7 @@ impl AppConfig {
             runtime: Config {
                 senders,
                 reveal_delay_ticks: cli.reveal_delay_ticks,
+                reveal_send_guard_ticks: cli.reveal_send_guard_ticks,
                 commit_amount: cli.commit_amount,
                 commit_reveal_sleep_ms: cli.commit_reveal_sleep_ms,
                 commit_reveal_pipeline_count: cli.commit_reveal_pipeline_count,
@@ -317,6 +323,7 @@ mod tests {
             seed: Some("a".repeat(55)),
             senders: 1,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
             commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
@@ -340,6 +347,7 @@ mod tests {
             seed: None,
             senders: 1,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
             commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
@@ -379,6 +387,7 @@ mod tests {
             seed: None,
             senders: 0,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
             commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,

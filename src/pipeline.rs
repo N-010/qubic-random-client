@@ -133,7 +133,12 @@ impl Pipeline {
                             });
                         }
                         Some(pending) => {
-                            if tick.tick < pending.reveal_send_at_tick.saturating_sub(2) {
+                            let reveal_send_guard = self.config.reveal_send_guard_ticks;
+                            if tick.tick
+                                < pending
+                                    .reveal_send_at_tick
+                                    .saturating_sub(reveal_send_guard)
+                            {
                                 console::log_info(format!(
                                     "pipeline[{id}] waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
                                     id = self.id,
@@ -275,6 +280,7 @@ mod tests {
         Config {
             senders: 1,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
             commit_reveal_sleep_ms: 0,
             commit_reveal_pipeline_count: 1,
