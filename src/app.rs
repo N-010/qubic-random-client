@@ -323,6 +323,7 @@ mod tests {
         let runtime = crate::config::Config {
             senders: 1,
             reveal_delay_ticks: 1,
+            reveal_send_guard_ticks: 2,
             commit_amount: 1,
             commit_reveal_sleep_ms: 1,
             commit_reveal_pipeline_count: 1,

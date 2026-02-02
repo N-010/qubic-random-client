@@ -13,7 +13,9 @@ mod imp {
     use crate::config::Config;
 
     pub(super) fn setup(handle: &Handle, config: &Config) {
-        if config.heap_dump && let Err(err) = dump_once() {
+        if config.heap_dump
+            && let Err(err) = dump_once()
+        {
             eprintln!("heap dump failed: {err}");
         }
 
