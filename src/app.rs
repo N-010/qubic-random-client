@@ -26,18 +26,21 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
     let contract_id = default_contract_id()?;
     let identity = scapi_wallet.get_identity();
 
+    let balance_state = Arc::new(BalanceState::new());
     let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(runtime.endpoint.clone()));
     let transport: Arc<dyn ScTransport> = Arc::new(ScapiContractTransport::new(
         runtime.endpoint.clone(),
         scapi_wallet,
         contract_id,
         1,
+        balance_state.clone(),
     ));
     run_with_components(
         runtime,
         identity,
         client,
         transport,
+        balance_state,
         wait_for_shutdown_signal(),
     )
     .await
@@ -48,9 +51,9 @@ async fn run_with_components(
     identity: String,
     client: Arc<dyn ScapiClient>,
     transport: Arc<dyn ScTransport>,
+    balance_state: Arc<BalanceState>,
     shutdown: impl std::future::Future<Output = AppResult<()>>,
 ) -> AppResult<()> {
-    let balance_state = Arc::new(BalanceState::new());
     let (tick_tx, mut tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
 
@@ -337,8 +340,16 @@ mod tests {
             Ok(())
         };
 
-        run_with_components(runtime, "identity".to_string(), client, transport, shutdown)
-            .await
-            .expect("run");
+        let balance_state = Arc::new(crate::balance::BalanceState::new());
+        run_with_components(
+            runtime,
+            "identity".to_string(),
+            client,
+            transport,
+            balance_state,
+            shutdown,
+        )
+        .await
+        .expect("run");
     }
 }
