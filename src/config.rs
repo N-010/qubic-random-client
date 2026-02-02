@@ -3,7 +3,6 @@ use std::io::Write as _;
 
 use atty::Stream;
 use clap::Parser;
-use rpassword;
 use zeroize::Zeroize;
 
 const DEFAULT_SENDERS: usize = 3;
@@ -144,7 +143,7 @@ fn validate_seed(seed: &str) -> Result<(), String> {
     if seed.len() != 55 {
         return Err("seed must be 55 characters".to_string());
     }
-    if !seed.bytes().all(|b| (b'a'..=b'z').contains(&b)) {
+    if !seed.bytes().all(|b| b.is_ascii_lowercase()) {
         return Err("seed must contain only a-z characters".to_string());
     }
     Ok(())

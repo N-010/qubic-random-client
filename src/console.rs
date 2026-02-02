@@ -15,19 +15,19 @@ pub fn init() {
 
 pub fn set_balance_line(line: impl Into<String>) {
     let line = line.into();
-    if let Some(status) = STATUS.get() {
-        if let Ok(mut status) = status.lock() {
-            status.balance = line;
-        }
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        status.balance = line;
     }
 }
 
 pub fn set_tick_line(line: impl Into<String>) {
     let line = line.into();
-    if let Some(status) = STATUS.get() {
-        if let Ok(mut status) = status.lock() {
-            status.tick = line;
-        }
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        status.tick = line;
     }
 }
 
