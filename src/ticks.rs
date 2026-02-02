@@ -33,7 +33,7 @@ impl ScapiTickSource {
             match self.client.get_tick_info().await {
                 Ok(info) => {
                     let key = (info.epoch, info.tick);
-                    if self.last != Some(key) {
+                    if self.last.is_none_or(|last| key > last) {
                         self.last = Some(key);
                         console::set_tick_line(format!("{}", info.tick));
                         if tx.send(info).await.is_err() {
@@ -103,12 +103,13 @@ mod tests {
 
     #[tokio::test]
     async fn tick_source_skips_duplicates() {
-        // Only changes in (epoch, tick) should be forwarded.
+        // Only strictly increasing (epoch, tick) values should be forwarded.
         with_timeout(Duration::from_millis(200), async {
             let client = Arc::new(MockClient::default());
             client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
             client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
             client.push_tick(Ok(TickInfo { epoch: 1, tick: 11 }));
+            client.push_tick(Ok(TickInfo { epoch: 1, tick: 9 }));
 
             let (tx, mut rx) = mpsc::channel(4);
             let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
@@ -119,6 +120,9 @@ mod tests {
 
             let second = rx.recv().await.expect("second tick");
             assert_eq!(second.tick, 11);
+
+            let third = timeout(Duration::from_millis(20), rx.recv()).await;
+            assert!(third.is_err());
 
             drop(rx);
             handle.abort();

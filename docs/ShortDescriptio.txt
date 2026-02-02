@@ -12,8 +12,10 @@ First you do a commit by publishing digest of your entropy bits, then you reveal
 Client sends commit-only with empty reveal, then after +3 ticks sends reveal+new commit for next round.
 revealedBits reveal etrnopy for the previous commit; committedDigest is for the next reveal.
 Both transactions send the configured commit amount (reveal-only is not used).
-Pipeline sleeps between ticks (commit_reveal_sleep_ms) to reduce busy work.
+Pipeline sleeps between ticks to reduce busy work.
 Pipeline pauses when available balance is below the configured commit amount.
+To tolerate slower tick polling, reveal is sent when current tick enters a configurable guard window
+before the target reveal tick (reveal_send_guard_ticks, e.g. 10 ticks).
 To prevent people from not revealing we require some security deposit to be placed, it's sent as amount
 When you commit you get security deposit held by SC, after revealing in time you get your money back, otherwise they are kept by SC forever
 You decide the amount yourself

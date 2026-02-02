@@ -10,8 +10,8 @@ const DEFAULT_SENDERS: usize = 3;
 const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG";
 const DEFAULT_COMMIT_AMOUNT: u64 = 10_000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
-const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 50;
-const DEFAULT_COMMIT_REVEAL_SLEEP_MS: u64 = 200;
+const DEFAULT_REVEAL_SEND_GUARD_TICKS: u32 = 5;
+const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 300;
 const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
 const DEFAULT_RUNTIME_THREADS: usize = 0;
 const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 0;
@@ -31,11 +31,11 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_REVEAL_DELAY_TICKS)]
     pub reveal_delay_ticks: u32,
 
+    #[arg(long, default_value_t = DEFAULT_REVEAL_SEND_GUARD_TICKS)]
+    pub reveal_send_guard_ticks: u32,
+
     #[arg(long, default_value_t = DEFAULT_COMMIT_AMOUNT)]
     pub commit_amount: u64,
-
-    #[arg(long, default_value_t = DEFAULT_COMMIT_REVEAL_SLEEP_MS)]
-    pub commit_reveal_sleep_ms: u64,
 
     #[arg(long, default_value_t = DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT)]
     pub commit_reveal_pipeline_count: usize,
@@ -97,8 +97,8 @@ pub struct AppConfig {
 pub struct Config {
     pub senders: usize,
     pub reveal_delay_ticks: u32,
+    pub reveal_send_guard_ticks: u32,
     pub commit_amount: u64,
-    pub commit_reveal_sleep_ms: u64,
     pub commit_reveal_pipeline_count: usize,
     pub runtime_threads: usize,
     pub heap_dump: bool,
@@ -139,8 +139,8 @@ impl AppConfig {
             runtime: Config {
                 senders,
                 reveal_delay_ticks: cli.reveal_delay_ticks,
+                reveal_send_guard_ticks: cli.reveal_send_guard_ticks,
                 commit_amount: cli.commit_amount,
-                commit_reveal_sleep_ms: cli.commit_reveal_sleep_ms,
                 commit_reveal_pipeline_count: cli.commit_reveal_pipeline_count,
                 runtime_threads,
                 heap_dump: cli.heap_dump,
@@ -317,8 +317,8 @@ mod tests {
             seed: Some("a".repeat(55)),
             senders: 1,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
-            commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 1,
             heap_dump: false,
@@ -340,8 +340,8 @@ mod tests {
             seed: None,
             senders: 1,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
-            commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 1,
             heap_dump: false,
@@ -379,8 +379,8 @@ mod tests {
             seed: None,
             senders: 0,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
-            commit_reveal_sleep_ms: 10,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 0,
             heap_dump: false,

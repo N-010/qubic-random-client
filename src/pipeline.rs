@@ -1,11 +1,9 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::sleep;
 
 use crate::balance::BalanceState;
 use crate::config::Config;
@@ -67,16 +65,12 @@ impl Pipeline {
         mut tick_rx: mpsc::Receiver<PipelineEvent>,
         job_tx: mpsc::Sender<RevealCommitJob>,
     ) {
-        let sleep_duration = Duration::from_millis(self.config.commit_reveal_sleep_ms);
         while let Some(event) = tick_rx.recv().await {
             match event {
                 PipelineEvent::Tick(tick) => {
                     let reveal_delay = self.config.reveal_delay_ticks;
 
                     if tick.tick <= self.tick.tick {
-                        // skip old tick
-                        sleep(sleep_duration).await;
-
                         continue;
                     }
 
@@ -90,7 +84,7 @@ impl Pipeline {
                                 balance = balance,
                                 commit_amount = commit_amount
                             ));
-                            sleep(sleep_duration).await;
+
                             continue;
                         }
                     }
@@ -99,7 +93,10 @@ impl Pipeline {
 
                     match &self.pending {
                         None => {
-                            let scheduled_tick = tick.tick.saturating_add(self.base_tick_offset());
+                            let scheduled_tick = tick
+                                .tick
+                                .saturating_add(self.base_tick_offset())
+                                .saturating_add(self.config.reveal_send_guard_ticks);
                             let mut revealed_bits = [0u8; 512];
                             fill_secure_bits(&mut revealed_bits);
                             let committed_digest = commit_digest(&revealed_bits);
@@ -133,7 +130,12 @@ impl Pipeline {
                             });
                         }
                         Some(pending) => {
-                            if tick.tick < pending.reveal_send_at_tick.saturating_sub(2) {
+                            let reveal_send_guard = self.config.reveal_send_guard_ticks;
+                            if tick.tick
+                                < pending
+                                    .reveal_send_at_tick
+                                    .saturating_sub(reveal_send_guard)
+                            {
                                 console::log_info(format!(
                                     "pipeline[{id}] waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
                                     id = self.id,
@@ -178,8 +180,6 @@ impl Pipeline {
                             });
                         }
                     }
-
-                    sleep(sleep_duration).await;
                 }
                 PipelineEvent::Shutdown { reply } => {
                     let shutdown_job = self.pending.take().map(|pending| {
@@ -275,8 +275,8 @@ mod tests {
         Config {
             senders: 1,
             reveal_delay_ticks: 3,
+            reveal_send_guard_ticks: 2,
             commit_amount: 10,
-            commit_reveal_sleep_ms: 0,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 1,
             heap_dump: false,
@@ -312,7 +312,7 @@ mod tests {
             .expect("job");
 
         assert_eq!(job.amount, config.commit_amount);
-        assert_eq!(job.tick, 13);
+        assert_eq!(job.tick, 15);
         assert!(job.input.revealed_bits.iter().all(|b| *b == 0));
         assert!(job.input.committed_digest.iter().any(|b| *b != 0));
 
@@ -348,7 +348,7 @@ mod tests {
         tick_tx
             .send(PipelineEvent::Tick(crate::ticks::TickInfo {
                 epoch: 1,
-                tick: 14,
+                tick: 16,
             }))
             .await
             .expect("send tick");
@@ -357,7 +357,7 @@ mod tests {
             .expect("reveal job");
 
         assert_eq!(job.amount, config.commit_amount);
-        assert_eq!(job.tick, 16);
+        assert_eq!(job.tick, 18);
         assert!(job.input.committed_digest.iter().any(|b| *b != 0));
 
         let (reply_tx, _reply_rx) = oneshot::channel();
@@ -432,7 +432,7 @@ mod tests {
         let job = job.expect("shutdown job");
 
         assert_eq!(job.amount, 0);
-        assert_eq!(job.tick, 16);
+        assert_eq!(job.tick, 18);
 
         handle.abort();
     }
@@ -543,7 +543,7 @@ mod tests {
             .await
             .expect("job");
 
-        assert_eq!(job.tick, 15);
+        assert_eq!(job.tick, 17);
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = tick_tx
@@ -780,7 +780,7 @@ mod tests {
         tick_tx
             .send(PipelineEvent::Tick(crate::ticks::TickInfo {
                 epoch: 1,
-                tick: 14,
+                tick: 16,
             }))
             .await
             .expect("send tick");
@@ -791,8 +791,8 @@ mod tests {
         dispatcher.abort();
 
         let calls = transport.calls.lock().expect("lock calls").clone();
-        assert!(calls.contains(&(10, 13)));
-        assert!(calls.contains(&(10, 16)));
+        assert!(calls.contains(&(10, 15)));
+        assert!(calls.contains(&(10, 18)));
     }
 
     #[tokio::test]
