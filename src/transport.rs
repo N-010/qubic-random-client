@@ -307,7 +307,15 @@ mod tests {
         let request_line = lines.next().unwrap_or("");
         let mut parts = request_line.split_whitespace();
         let method = parts.next().unwrap_or("").to_string();
-        let path = parts.next().unwrap_or("/").to_string();
+        let mut path = parts.next().unwrap_or("/").to_string();
+        if let Some((_, rest)) = path.split_once("://") {
+            path = rest
+                .find('/')
+                .map_or_else(|| "/".to_string(), |idx| rest[idx..].to_string());
+        }
+        if let Some((base, _)) = path.split_once('?') {
+            path = base.to_string();
+        }
         let mut content_length = 0usize;
         let mut is_chunked = false;
         let mut expect_continue = false;
