@@ -30,7 +30,7 @@
 ### Ключевые типы/трейты
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
-- `Config`: `senders`, `reveal_delay_ticks`, `commit_amount`, `commit_reveal_pipeline_count`, `runtime_threads`, `contract_id`, `endpoint`, `balance_interval_ms`.
+- `Config`: `senders`, `reveal_delay_ticks`, `commit_amount`, `commit_reveal_pipeline_count`, `runtime_threads`, `endpoint`, `balance_interval_ms`.
 - `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.

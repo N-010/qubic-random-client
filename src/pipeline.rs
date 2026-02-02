@@ -283,7 +283,6 @@ mod tests {
             heap_stats: false,
             heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 1,
-            contract_id: "id".to_string(),
             endpoint: "http://localhost".to_string(),
             balance_interval_ms: 1,
         }
