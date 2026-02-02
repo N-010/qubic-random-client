@@ -107,13 +107,12 @@ async fn shutdown_pipelines(
         {
             continue;
         }
-        if let Ok(Some(job)) = reply_rx.await {
-            if let Err(err) = transport
+        if let Ok(Some(job)) = reply_rx.await
+            && let Err(err) = transport
                 .send_reveal_and_commit(job.input, job.amount, job.tick)
                 .await
-            {
-                console::log_warn(format!("shutdown RevealAndCommit failed: {err}"));
-            }
+        {
+            console::log_warn(format!("shutdown RevealAndCommit failed: {err}"));
         }
     }
 }
