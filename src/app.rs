@@ -325,7 +325,6 @@ mod tests {
             reveal_delay_ticks: 1,
             reveal_send_guard_ticks: 2,
             commit_amount: 1,
-            commit_reveal_sleep_ms: 1,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 1,
             heap_dump: false,

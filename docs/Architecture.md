@@ -30,7 +30,7 @@
 ### Ключевые типы/трейты
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
-- `Config`: `senders`, `reveal_delay_ticks`, `commit_amount`, `commit_reveal_sleep_ms`, `commit_reveal_pipeline_count`, `runtime_threads`, `contract_id`, `endpoint`, `balance_interval_ms`.
+- `Config`: `senders`, `reveal_delay_ticks`, `commit_amount`, `commit_reveal_pipeline_count`, `runtime_threads`, `contract_id`, `endpoint`, `balance_interval_ms`.
 - `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
@@ -56,3 +56,10 @@
 - The main task sends this reveal synchronously before exit (not via background senders) to avoid Ctrl-C races.
 - This shutdown reveal uses amount=0 and sets committed_digest = K12(revealed_bits), so it does not create a new paid commit.
 - The shutdown reveal tick is max(pending.reveal_send_at_tick, current_tick + reveal_delay_ticks) to avoid using an outdated tick.
+
+## Tick window for slow RPC polling (ASCII)
+- Problem: frequent tick polling can trigger RPC rate limits; lowering poll frequency risks missing the exact reveal tick.
+- Solution: use a configurable "send window" before the target reveal tick, so a late tick still triggers the send.
+- Config: `reveal_send_guard_ticks` defines the window size (e.g. 10 ticks). When `now_tick >= reveal_send_at_tick - guard`, the pipeline sends reveal+commit.
+- The reveal/commit interval remains `reveal_delay_ticks` (default 3); only the allowable send time is widened.
+- Requirement: pick `reveal_send_guard_ticks` >= max expected tick polling gap to ensure at least one tick lands in the window.
