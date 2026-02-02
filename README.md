@@ -44,6 +44,9 @@ If `--seed` is not provided, the seed is read from stdin/TTY.
 --commit-reveal-sleep-ms <ms>      Sleep between ticks in pipeline (default: 200)
 --commit-reveal-pipeline-count <n> Pipeline size (default: 3)
 --runtime-threads <n>              Runtime threads (0 = auto)
+--heap-dump                        Trigger a jemalloc heap profile dump at startup
+--heap-stats                       Print allocator stats on shutdown (Ctrl+C)
+--heap-dump-interval-secs <n>      Periodic heap dump interval in seconds (0 = disabled)
 --tick-poll-interval-ms <ms>       Tick polling interval (default: 50)
 --contract-id <id>                 Contract ID (default: Random SC)
 --endpoint <url>                   RPC endpoint
@@ -54,3 +57,17 @@ If `--seed` is not provided, the seed is read from stdin/TTY.
 - Each transaction contains the reveal for the previous commit plus a new commit.
 - The seed is kept in locked memory and zeroized on shutdown.
 - On shutdown, a pending reveal is sent synchronously.
+
+## Heap profiling (jemalloc)
+- Build with jemalloc enabled: `cargo build --features jemalloc`.
+- Enable profiling before start: `JEMALLOC_CONF=prof:true,prof_active:true,lg_prof_interval:30`.
+- Trigger a dump at startup with `--heap-dump`, or periodically with `--heap-dump-interval-secs`.
+- Print allocator stats on shutdown with `--heap-stats`.
+- Use `JEMALLOC_CONF=prof_prefix:/path/prefix` to control where dumps are written.
+- Jemalloc profiling is not supported on MSVC targets.
+
+## Windows allocator stats (mimalloc)
+- Build with mimalloc enabled: `cargo build --features mimalloc`.
+- Use `--heap-stats` to print allocator stats on shutdown (e.g., Ctrl+C).
+- `MIMALLOC_SHOW_STATS=1` also prints stats on shutdown if set.
+- `--heap-dump` flags require jemalloc and are not available on MSVC.

@@ -40,11 +40,30 @@ cargo run
 --commit-reveal-sleep-ms <N>   Пауза между итерациями commit/reveal (мс); снижает нагрузку на CPU
 --commit-reveal-pipeline-count <N> Количество параллельных pipeline commit/reveal (цепочек commit→reveal)
 --runtime-threads <N>          Потоки Tokio для выполнения задач: больше = выше параллельность и нагрузка; 0 = авто (по числу логических ядер)
+--heap-dump                    Снять heap-профиль jemalloc при старте
+--heap-stats                   Печатать статистику аллокатора при завершении (Ctrl+C)
+--heap-dump-interval-secs <N>  Интервал периодических heap-дампов в секундах (0 = отключено)
 --tick-poll-interval-ms <N>    Как часто опрашивать текущий тик (мс)
 --contract-id <ID>             ID смарт-контракта Random, куда отправляются транзакции
 --endpoint <URL>               RPC endpoint для запросов и отправки транзакций
 --balance-interval-ms <N>      Интервал запроса баланса (мс)
 ```
+
+## Heap-профилирование (jemalloc)
+
+- Сборка с jemalloc: `cargo build --features jemalloc`.
+- Включите профилирование до старта: `JEMALLOC_CONF=prof:true,prof_active:true,lg_prof_interval:30`.
+- Снять дамп при старте: `--heap-dump`, либо периодически: `--heap-dump-interval-secs`.
+- Печатать статистику аллокатора при завершении: `--heap-stats`.
+- Для пути дампов используйте `JEMALLOC_CONF=prof_prefix:/path/prefix`.
+- Профилирование jemalloc не поддерживается на MSVC.
+
+## Статистика аллокатора на Windows (mimalloc)
+
+- Сборка с mimalloc: `cargo build --features mimalloc`.
+- Используйте `--heap-stats`, чтобы печатать статистику при завершении (например, Ctrl+C).
+- `MIMALLOC_SHOW_STATS=1` также печатает статистику при завершении.
+- Флаги `--heap-dump` требуют jemalloc и недоступны на MSVC.
 
 ## Как работает pipeline
 

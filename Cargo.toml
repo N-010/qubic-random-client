@@ -4,19 +4,29 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
-scapi = { git = "https://github.com/N-010/scapi", version = "0.2.5", rev = "0978a0b47350373e45f4f7442dc2cf9c78241bb2" }
+scapi = { git = "https://github.com/N-010/scapi", version = "0.2.5", rev = "57723772ea92e7ac54170b0f2ec706bdd5543805" }
 async-trait = "0.1"
 atty = "0.2"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 rand_core = "0.6.4"
 rpassword = "7"
+mimalloc = { version = "0.1", optional = true }
+libmimalloc-sys = { version = "0.1", optional = true, features = ["extended"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tiny-keccak = { version = "2", features = ["k12"] }
 zeroize = "1"
 
+[features]
+jemalloc = ["dep:tikv-jemalloc-ctl", "dep:tikv-jemallocator"]
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemalloc-ctl = { version = "0.6", optional = true, features = ["stats", "profiling", "use_std"] }
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Memory"] }

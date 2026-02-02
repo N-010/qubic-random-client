@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 use crate::balance::{BalanceState, run_balance_watcher};
 use crate::config::AppConfig;
 use crate::console;
+use crate::heap_prof;
 use crate::pipeline::{Pipeline, PipelineEvent, run_job_dispatcher};
 use crate::ticks::ScapiTickSource;
 use crate::transport::{ScTransport, ScapiClient, ScapiContractTransport, ScapiRpcClient};
@@ -140,6 +141,7 @@ async fn wait_for_shutdown_signal() -> AppResult<()> {
             _ = ctrl_shutdown.recv() => {}
         }
 
+        heap_prof::on_shutdown();
         Ok(())
     }
 
@@ -159,12 +161,14 @@ async fn wait_for_shutdown_signal() -> AppResult<()> {
             _ = sighup.recv() => {}
         }
 
+        heap_prof::on_shutdown();
         Ok(())
     }
 
     #[cfg(not(any(windows, unix)))]
     {
         tokio::signal::ctrl_c().await?;
+        heap_prof::on_shutdown();
         Ok(())
     }
 }
@@ -323,6 +327,9 @@ mod tests {
             commit_reveal_sleep_ms: 1,
             commit_reveal_pipeline_count: 1,
             runtime_threads: 1,
+            heap_dump: false,
+            heap_stats: false,
+            heap_dump_interval_secs: 0,
             tick_poll_interval_ms: 1,
             contract_id: "id".to_string(),
             endpoint: "endpoint".to_string(),

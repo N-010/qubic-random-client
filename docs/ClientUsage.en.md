@@ -40,11 +40,30 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 --commit-reveal-sleep-ms <N>   Sleep between commit/reveal iterations (default 200)
 --commit-reveal-pipeline-count <N> Number of parallel commit/reveal pipelines (default 3)
 --runtime-threads <N>          Tokio worker threads (default 0 = auto)
+--heap-dump                    Trigger a jemalloc heap profile dump at startup
+--heap-stats                   Print allocator stats on shutdown (Ctrl+C)
+--heap-dump-interval-secs <N>  Periodic heap dump interval in seconds (0 = disabled)
 --tick-poll-interval-ms <N>    Tick poll interval (default 50)
 --contract-id <ID>             Contract ID (default DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANMIG)
 --endpoint <URL>               RPC endpoint (default https://rpc.qubic.org/live/v1/)
 --balance-interval-ms <N>      Balance print interval (default 300)
 ```
+
+## Heap profiling (jemalloc)
+
+- Build with jemalloc enabled: `cargo build --features jemalloc`.
+- Enable profiling before start: `JEMALLOC_CONF=prof:true,prof_active:true,lg_prof_interval:30`.
+- Trigger a dump at startup with `--heap-dump`, or periodically with `--heap-dump-interval-secs`.
+- Print allocator stats on shutdown with `--heap-stats`.
+- Use `JEMALLOC_CONF=prof_prefix:/path/prefix` to control where dumps are written.
+- Jemalloc profiling is not supported on MSVC targets.
+
+## Windows allocator stats (mimalloc)
+
+- Build with mimalloc enabled: `cargo build --features mimalloc`.
+- Use `--heap-stats` to print allocator stats on shutdown (e.g., Ctrl+C).
+- `MIMALLOC_SHOW_STATS=1` also prints stats on shutdown if set.
+- `--heap-dump` flags require jemalloc and are not available on MSVC.
 
 ## Pipeline behavior
 
