@@ -81,20 +81,6 @@ jobs:
           $out = "dist\$bin"
           Copy-Item "target\release\$bin" $out
 
-      - name: Checksums (linux/macos)
-        if: runner.os != 'Windows'
-        run: |
-          (cd dist && shasum -a 256 * > SHA256SUMS.txt) || true
-
-      - name: Checksums (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Get-ChildItem dist\*.exe | ForEach-Object {
-            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            "$h  $($_.Name)" | Out-File -FilePath dist\SHA256SUMS.txt -Append -Encoding ascii
-          }
-
       - name: Upload binaries to Release
         uses: softprops/action-gh-release@v2
         with:
