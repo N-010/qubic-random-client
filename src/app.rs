@@ -197,6 +197,13 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
+    async fn with_timeout<T>(
+        duration: Duration,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        timeout(duration, future).await.expect("timeout")
+    }
+
     #[derive(Debug, Default)]
     struct MockTransport {
         calls: Mutex<Vec<(u64, u32)>>,
@@ -324,9 +331,7 @@ mod tests {
 
         let shutdown_notify = notify.clone();
         let shutdown = async move {
-            timeout(Duration::from_millis(200), shutdown_notify.notified())
-                .await
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))?;
+            with_timeout(Duration::from_millis(200), shutdown_notify.notified()).await;
             Ok(())
         };
 

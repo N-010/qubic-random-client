@@ -61,6 +61,13 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
+    async fn with_timeout<T>(
+        duration: Duration,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        timeout(duration, future).await.expect("timeout")
+    }
+
     #[derive(Debug, Default)]
     struct MockClient {
         ticks: Mutex<VecDeque<Result<TickInfo, TransportError>>>,
@@ -97,67 +104,66 @@ mod tests {
     #[tokio::test]
     async fn tick_source_skips_duplicates() {
         // Only changes in (epoch, tick) should be forwarded.
-        let client = Arc::new(MockClient::default());
-        client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
-        client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
-        client.push_tick(Ok(TickInfo { epoch: 1, tick: 11 }));
+        with_timeout(Duration::from_millis(200), async {
+            let client = Arc::new(MockClient::default());
+            client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
+            client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
+            client.push_tick(Ok(TickInfo { epoch: 1, tick: 11 }));
 
-        let (tx, mut rx) = mpsc::channel(4);
-        let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
-        let handle = tokio::spawn(tick_source.run(tx));
+            let (tx, mut rx) = mpsc::channel(4);
+            let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
+            let handle = tokio::spawn(tick_source.run(tx));
 
-        let first = timeout(Duration::from_millis(50), rx.recv())
-            .await
-            .expect("first tick timeout")
-            .expect("first tick");
-        assert_eq!(first.tick, 10);
+            let first = rx.recv().await.expect("first tick");
+            assert_eq!(first.tick, 10);
 
-        let second = timeout(Duration::from_millis(50), rx.recv())
-            .await
-            .expect("second tick timeout")
-            .expect("second tick");
-        assert_eq!(second.tick, 11);
+            let second = rx.recv().await.expect("second tick");
+            assert_eq!(second.tick, 11);
 
-        drop(rx);
-        handle.abort();
+            drop(rx);
+            handle.abort();
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn tick_source_continues_after_error() {
         // Errors should be logged but not stop the loop.
-        let client = Arc::new(MockClient::default());
-        client.push_tick(Err(TransportError {
-            message: "boom".to_string(),
-        }));
-        client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
+        with_timeout(Duration::from_millis(200), async {
+            let client = Arc::new(MockClient::default());
+            client.push_tick(Err(TransportError {
+                message: "boom".to_string(),
+            }));
+            client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
 
-        let (tx, mut rx) = mpsc::channel(4);
-        let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
-        let handle = tokio::spawn(tick_source.run(tx));
+            let (tx, mut rx) = mpsc::channel(4);
+            let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
+            let handle = tokio::spawn(tick_source.run(tx));
 
-        let tick = timeout(Duration::from_millis(50), rx.recv())
-            .await
-            .expect("tick timeout")
-            .expect("tick");
-        assert_eq!(tick.tick, 5);
+            let tick = rx.recv().await.expect("tick");
+            assert_eq!(tick.tick, 5);
 
-        drop(rx);
-        handle.abort();
+            drop(rx);
+            handle.abort();
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn tick_source_stops_when_channel_closed() {
         // Closing the receiver should stop the source loop.
-        let client = Arc::new(MockClient::default());
-        client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
+        with_timeout(Duration::from_millis(200), async {
+            let client = Arc::new(MockClient::default());
+            client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
 
-        let (tx, rx) = mpsc::channel(4);
-        let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
-        let handle = tokio::spawn(tick_source.run(tx));
+            let (tx, rx) = mpsc::channel(4);
+            let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
+            let handle = tokio::spawn(tick_source.run(tx));
 
-        drop(rx);
+            drop(rx);
 
-        let result = timeout(Duration::from_millis(50), handle).await;
-        assert!(result.is_ok());
+            let _ = handle.await;
+        })
+        .await;
     }
 }

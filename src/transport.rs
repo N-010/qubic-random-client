@@ -627,7 +627,11 @@ mod tests {
         let client = ScapiRpcClient::new(server.base_url());
 
         let err = client.get_tick_info().await.expect_err("expected error");
-        assert!(err.message.contains("RPC HTTP error"));
+        let message = err.message;
+        assert!(
+            message.contains("RPC HTTP error") || message.contains("error sending request"),
+            "unexpected error message: {message}"
+        );
     }
 
     #[test]

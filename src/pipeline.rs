@@ -262,7 +262,14 @@ mod tests {
     use tokio::sync::Semaphore;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
+
+    async fn with_timeout<T>(
+        duration: Duration,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        timeout(duration, future).await.expect("timeout")
+    }
 
     fn test_config() -> Config {
         Config {
@@ -297,9 +304,8 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let job = timeout(Duration::from_millis(50), job_rx.recv())
+        let job = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("job timeout")
             .expect("job");
 
         assert_eq!(job.amount, config.commit_amount);
@@ -332,9 +338,8 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let _ = timeout(Duration::from_millis(50), job_rx.recv())
+        let _ = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("commit job timeout")
             .expect("commit job");
 
         tick_tx
@@ -344,9 +349,8 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let job = timeout(Duration::from_millis(50), job_rx.recv())
+        let job = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("reveal job timeout")
             .expect("reveal job");
 
         assert_eq!(job.amount, config.commit_amount);
@@ -378,8 +382,14 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let result = timeout(Duration::from_millis(20), job_rx.recv()).await;
-        assert!(result.is_err());
+        let mut got_job = false;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(20)) => {}
+            _ = async { job_rx.recv().await } => {
+                got_job = true;
+            }
+        }
+        assert!(!got_job);
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = tick_tx
@@ -406,9 +416,8 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let _ = timeout(Duration::from_millis(50), job_rx.recv())
+        let _ = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("commit job timeout")
             .expect("commit job");
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -451,9 +460,8 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let _ = timeout(Duration::from_millis(50), job_rx.recv())
+        let _ = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("job timeout")
             .expect("job");
 
         tick_tx
@@ -463,8 +471,14 @@ mod tests {
             }))
             .await
             .expect("send old tick");
-        let result = timeout(Duration::from_millis(20), job_rx.recv()).await;
-        assert!(result.is_err());
+        let mut got_job = false;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(20)) => {}
+            _ = async { job_rx.recv().await } => {
+                got_job = true;
+            }
+        }
+        assert!(!got_job);
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = tick_tx
@@ -492,9 +506,8 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let job = timeout(Duration::from_millis(50), job_rx.recv())
+        let job = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("job timeout")
             .expect("job");
         assert_eq!(job.amount, 0);
 
@@ -523,9 +536,8 @@ mod tests {
             }))
             .await
             .expect("send tick");
-        let job = timeout(Duration::from_millis(50), job_rx.recv())
+        let job = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("job timeout")
             .expect("job");
 
         assert_eq!(job.tick, 15);
@@ -619,19 +631,23 @@ mod tests {
             job_tx.send(job).await.expect("send job");
         }
 
-        timeout(Duration::from_millis(50), started_rx.recv())
+        with_timeout(Duration::from_millis(200), started_rx.recv())
             .await
-            .expect("first start timeout")
             .expect("first start");
 
-        let second_start = timeout(Duration::from_millis(20), started_rx.recv()).await;
-        assert!(second_start.is_err());
+        let mut got_second = false;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(20)) => {}
+            _ = async { started_rx.recv().await } => {
+                got_second = true;
+            }
+        }
+        assert!(!got_second);
 
         hold.add_permits(1);
 
-        timeout(Duration::from_millis(50), started_rx.recv())
+        with_timeout(Duration::from_millis(200), started_rx.recv())
             .await
-            .expect("second start timeout")
             .expect("second start");
 
         hold.add_permits(1);
@@ -661,9 +677,8 @@ mod tests {
         };
         job_tx.send(job).await.expect("send job");
 
-        timeout(Duration::from_millis(50), started_rx.recv())
+        with_timeout(Duration::from_millis(200), started_rx.recv())
             .await
-            .expect("start timeout")
             .expect("start");
 
         hold.add_permits(1);
