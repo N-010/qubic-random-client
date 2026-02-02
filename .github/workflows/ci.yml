@@ -67,7 +67,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          BIN="RandomClient"
+          BIN="RandomCient"
           OUT="dist/${BIN}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}"
           cp "target/release/$BIN" "$OUT"
           chmod +x "$OUT"
@@ -77,7 +77,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          $bin = "myapp.exe"  # <-- имя бинарника
+          $bin = "RandomCient.exe"  
           $out = "dist\myapp-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}.exe"
           Copy-Item "target\release\$bin" $out
 
