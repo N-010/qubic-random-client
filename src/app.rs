@@ -18,21 +18,9 @@ pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub async fn run(config: AppConfig) -> AppResult<()> {
     console::init();
     let AppConfig { seed, runtime } = config;
-    let scapi_wallet = match ScapiQubicWallet::from_seed(seed.expose()) {
-        Ok(wallet) => wallet,
-        Err(err) => {
-            console::log_warn(format!("failed to derive scapi wallet from seed: {}", err));
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
-        }
-    };
+    let scapi_wallet = wallet_from_seed(seed.expose())?;
     drop(seed);
-    let contract_id = match ScapiQubicId::from_str(&runtime.contract_id) {
-        Ok(contract_id) => contract_id,
-        Err(err) => {
-            console::log_warn(format!("invalid contract id: {}", err));
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into());
-        }
-    };
+    let contract_id = contract_id_from_str(&runtime.contract_id)?;
     let identity = scapi_wallet.get_identity();
 
     let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(runtime.endpoint.clone()));
@@ -42,8 +30,24 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         contract_id,
         1,
     ));
-    let balance_state = Arc::new(BalanceState::new());
+    run_with_components(
+        runtime,
+        identity,
+        client,
+        transport,
+        wait_for_shutdown_signal(),
+    )
+    .await
+}
 
+async fn run_with_components(
+    runtime: crate::config::Config,
+    identity: String,
+    client: Arc<dyn ScapiClient>,
+    transport: Arc<dyn ScTransport>,
+    shutdown: impl std::future::Future<Output = AppResult<()>>,
+) -> AppResult<()> {
+    let balance_state = Arc::new(BalanceState::new());
     let (tick_tx, mut tick_rx) = mpsc::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
 
@@ -88,7 +92,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         runtime.senders,
     ));
 
-    let result = wait_for_shutdown_signal().await;
+    let result = shutdown.await;
     shutdown_pipelines(&pipeline_txs, transport.clone()).await;
     console::shutdown().await;
     result
@@ -162,5 +166,172 @@ async fn wait_for_shutdown_signal() -> AppResult<()> {
     {
         tokio::signal::ctrl_c().await?;
         Ok(())
+    }
+}
+
+fn wallet_from_seed(seed: &str) -> AppResult<ScapiQubicWallet> {
+    ScapiQubicWallet::from_seed(seed).map_err(|err| {
+        console::log_warn(format!("failed to derive scapi wallet from seed: {}", err));
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into()
+    })
+}
+
+fn contract_id_from_str(contract_id: &str) -> AppResult<ScapiQubicId> {
+    ScapiQubicId::from_str(contract_id).map_err(|err| {
+        console::log_warn(format!("invalid contract id: {}", err));
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{contract_id_from_str, run_with_components, shutdown_pipelines, wallet_from_seed};
+    use crate::balance::BalanceEntry;
+    use crate::pipeline::PipelineEvent;
+    use crate::protocol::RevealAndCommitInput;
+    use crate::ticks::TickInfo;
+    use crate::transport::{ScTransport, TransportError};
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    #[derive(Debug, Default)]
+    struct MockTransport {
+        calls: Mutex<Vec<(u64, u32)>>,
+    }
+
+    #[async_trait]
+    impl ScTransport for MockTransport {
+        async fn send_reveal_and_commit(
+            &self,
+            _input: RevealAndCommitInput,
+            amount: u64,
+            tick: u32,
+        ) -> Result<String, TransportError> {
+            self.calls.lock().expect("lock calls").push((amount, tick));
+            Ok("tx".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_pipelines_sends_pending_reveal() {
+        // Shutdown should send pending reveal job through transport.
+        let (tx, mut rx) = mpsc::channel(1);
+        let transport = Arc::new(MockTransport::default());
+
+        let handle = tokio::spawn(async move {
+            if let Some(PipelineEvent::Shutdown { reply }) = rx.recv().await {
+                let _ = reply.send(Some(crate::pipeline::RevealCommitJob {
+                    input: RevealAndCommitInput {
+                        revealed_bits: [0u8; 512],
+                        committed_digest: [0u8; 32],
+                    },
+                    amount: 0,
+                    tick: 42,
+                }));
+            }
+        });
+
+        shutdown_pipelines(&[tx], transport.clone()).await;
+
+        let calls = transport.calls.lock().expect("lock calls");
+        assert_eq!(calls.as_slice(), &[(0, 42)]);
+
+        handle.abort();
+    }
+
+    #[test]
+    fn wallet_from_seed_rejects_invalid_seed() {
+        // Invalid seed should fail wallet derivation.
+        let err = wallet_from_seed("invalid").expect_err("expected error");
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn contract_id_from_str_rejects_invalid() {
+        // Invalid contract id string should fail parsing.
+        let _err = contract_id_from_str("invalid").expect_err("expected error");
+    }
+
+    #[tokio::test]
+    async fn run_with_components_starts_pipeline_and_dispatch() {
+        // With a tick source and balance, at least one transport send should happen.
+        #[derive(Debug, Default)]
+        struct MockClient {
+            tick: Mutex<u32>,
+        }
+
+        #[async_trait]
+        impl crate::transport::ScapiClient for MockClient {
+            async fn get_tick_info(&self) -> Result<TickInfo, TransportError> {
+                let mut tick = self.tick.lock().expect("lock tick");
+                *tick += 1;
+                Ok(TickInfo {
+                    epoch: 1,
+                    tick: *tick,
+                })
+            }
+
+            async fn get_balances(
+                &self,
+                _identity: &str,
+            ) -> Result<Vec<BalanceEntry>, TransportError> {
+                Ok(vec![BalanceEntry {
+                    asset: "ID".to_string(),
+                    amount: 100,
+                }])
+            }
+        }
+
+        #[derive(Debug)]
+        struct NotifyTransport {
+            notify: Arc<Notify>,
+        }
+
+        #[async_trait]
+        impl ScTransport for NotifyTransport {
+            async fn send_reveal_and_commit(
+                &self,
+                _input: RevealAndCommitInput,
+                _amount: u64,
+                _tick: u32,
+            ) -> Result<String, TransportError> {
+                self.notify.notify_one();
+                Ok("tx".to_string())
+            }
+        }
+
+        let client = Arc::new(MockClient::default());
+        let notify = Arc::new(Notify::new());
+        let transport = Arc::new(NotifyTransport {
+            notify: notify.clone(),
+        });
+
+        let runtime = crate::config::Config {
+            senders: 1,
+            reveal_delay_ticks: 1,
+            commit_amount: 1,
+            commit_reveal_sleep_ms: 1,
+            commit_reveal_pipeline_count: 1,
+            runtime_threads: 1,
+            tick_poll_interval_ms: 1,
+            contract_id: "id".to_string(),
+            endpoint: "endpoint".to_string(),
+            balance_interval_ms: 1,
+        };
+
+        let shutdown_notify = notify.clone();
+        let shutdown = async move {
+            timeout(Duration::from_millis(200), shutdown_notify.notified())
+                .await
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))?;
+            Ok(())
+        };
+
+        run_with_components(runtime, "identity".to_string(), client, transport, shutdown)
+            .await
+            .expect("run");
     }
 }

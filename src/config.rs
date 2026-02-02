@@ -100,11 +100,11 @@ pub struct Config {
 impl AppConfig {
     pub fn from_cli() -> Result<Self, String> {
         let cli = Cli::parse();
-        let seed_value = if let Some(seed) = cli.seed {
-            seed
-        } else {
-            read_seed_from_stdin()?
-        };
+        let seed_value = resolve_seed(&cli, read_seed_from_stdin)?;
+        Self::from_cli_inner(cli, seed_value)
+    }
+
+    fn from_cli_inner(cli: Cli, seed_value: String) -> Result<Self, String> {
         let seed = Seed::new(seed_value)?;
         let senders = if cli.senders == 0 {
             std::thread::available_parallelism()
@@ -149,6 +149,17 @@ fn validate_seed(seed: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_seed<F>(cli: &Cli, read_seed: F) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    if let Some(seed) = cli.seed.clone() {
+        Ok(seed)
+    } else {
+        read_seed()
+    }
+}
+
 fn read_seed_from_stdin() -> Result<String, String> {
     let seed = if atty::is(Stream::Stdin) {
         print!("seed: ");
@@ -161,17 +172,24 @@ fn read_seed_from_stdin() -> Result<String, String> {
         input.zeroize();
         seed
     } else {
-        let mut input = String::new();
-        let bytes = std::io::stdin()
-            .read_line(&mut input)
-            .map_err(|err| format!("failed to read seed from stdin: {err}"))?;
-        if bytes == 0 {
-            return Err("seed from stdin is empty".to_string());
-        }
-        let seed = input.trim().to_string();
-        input.zeroize();
-        seed
+        read_seed_from_reader(std::io::stdin().lock())?
     };
+    if seed.is_empty() {
+        return Err("seed from stdin is empty".to_string());
+    }
+    Ok(seed)
+}
+
+fn read_seed_from_reader<R: std::io::BufRead>(mut reader: R) -> Result<String, String> {
+    let mut input = String::new();
+    let bytes = reader
+        .read_line(&mut input)
+        .map_err(|err| format!("failed to read seed from stdin: {err}"))?;
+    if bytes == 0 {
+        return Err("seed from stdin is empty".to_string());
+    }
+    let seed = input.trim().to_string();
+    input.zeroize();
     if seed.is_empty() {
         return Err("seed from stdin is empty".to_string());
     }
@@ -249,3 +267,115 @@ fn lock_bytes(_bytes: &[u8]) -> Result<(), String> {
 
 #[cfg(not(any(unix, windows)))]
 fn unlock_bytes(_bytes: &[u8]) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppConfig, Cli, Seed, read_seed_from_reader, resolve_seed, validate_seed};
+    use std::io::Cursor;
+
+    #[test]
+    fn validate_seed_accepts_55_lowercase() {
+        // 55 lowercase letters is the only valid seed shape.
+        let seed = "a".repeat(55);
+        assert!(validate_seed(&seed).is_ok());
+    }
+
+    #[test]
+    fn validate_seed_rejects_wrong_length() {
+        // 54 chars should fail length validation.
+        let seed = "a".repeat(54);
+        assert!(validate_seed(&seed).is_err());
+    }
+
+    #[test]
+    fn validate_seed_rejects_non_lowercase() {
+        // Uppercase is not allowed even if length is correct.
+        let seed = "a".repeat(54) + "Z";
+        assert!(validate_seed(&seed).is_err());
+    }
+
+    #[test]
+    fn resolve_seed_prefers_cli_value() {
+        // When --seed is set, stdin must not be read.
+        let cli = Cli {
+            seed: Some("a".repeat(55)),
+            senders: 1,
+            reveal_delay_ticks: 3,
+            commit_amount: 10,
+            commit_reveal_sleep_ms: 10,
+            commit_reveal_pipeline_count: 1,
+            runtime_threads: 1,
+            tick_poll_interval_ms: 10,
+            contract_id: "id".to_string(),
+            endpoint: "endpoint".to_string(),
+            balance_interval_ms: 10,
+        };
+        let result = resolve_seed(&cli, || Err("should not read".to_string()));
+        assert_eq!(result.expect("seed"), "a".repeat(55));
+    }
+
+    #[test]
+    fn resolve_seed_uses_reader_error() {
+        // If --seed is missing, the reader error must be propagated.
+        let cli = Cli {
+            seed: None,
+            senders: 1,
+            reveal_delay_ticks: 3,
+            commit_amount: 10,
+            commit_reveal_sleep_ms: 10,
+            commit_reveal_pipeline_count: 1,
+            runtime_threads: 1,
+            tick_poll_interval_ms: 10,
+            contract_id: "id".to_string(),
+            endpoint: "endpoint".to_string(),
+            balance_interval_ms: 10,
+        };
+        let err = resolve_seed(&cli, || Err("no seed".to_string())).expect_err("expected err");
+        assert_eq!(err, "no seed");
+    }
+
+    #[test]
+    fn read_seed_from_reader_rejects_empty() {
+        // Empty stdin is an error.
+        let cursor = Cursor::new("");
+        let err = read_seed_from_reader(cursor).expect_err("expected error");
+        assert_eq!(err, "seed from stdin is empty");
+    }
+
+    #[test]
+    fn read_seed_from_reader_trims_input() {
+        // Trailing newline is trimmed.
+        let cursor = Cursor::new("abc\n");
+        let seed = read_seed_from_reader(cursor).expect("seed");
+        assert_eq!(seed, "abc");
+    }
+
+    #[test]
+    fn from_cli_inner_auto_threads_and_senders() {
+        // Zero values are replaced by available_parallelism.
+        let cli = Cli {
+            seed: None,
+            senders: 0,
+            reveal_delay_ticks: 3,
+            commit_amount: 10,
+            commit_reveal_sleep_ms: 10,
+            commit_reveal_pipeline_count: 1,
+            runtime_threads: 0,
+            tick_poll_interval_ms: 10,
+            contract_id: "id".to_string(),
+            endpoint: "endpoint".to_string(),
+            balance_interval_ms: 10,
+        };
+        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
+        assert!(config.runtime.senders > 0);
+        assert!(config.runtime.runtime_threads > 0);
+    }
+
+    #[test]
+    fn seed_expose_returns_original() {
+        // Seed::expose returns the exact original string.
+        let seed_value = "a".repeat(55);
+        let seed = Seed::new(seed_value.clone()).expect("seed");
+        assert_eq!(seed.expose(), seed_value);
+    }
+}
