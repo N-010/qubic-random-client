@@ -34,6 +34,7 @@ pub struct RevealCommitJob {
     pub amount: u64,
     pub tick: u32,
     pub kind: RevealCommitKind,
+    pub pipeline_id: usize,
 }
 
 pub type CurrentTick = Arc<AtomicU64>;
@@ -108,6 +109,7 @@ impl Pipeline {
                             amount: 0,
                             tick: reveal_tick,
                             kind: RevealCommitKind::Reveal,
+                            pipeline_id: self.id,
                         };
 
                         console::log_info(format!(
@@ -171,6 +173,7 @@ impl Pipeline {
                                 amount: self.config.commit_amount,
                                 tick: scheduled_tick,
                                 kind: RevealCommitKind::CommitOnly,
+                                pipeline_id: self.id,
                             };
 
                             console::log_info(format!(
@@ -222,15 +225,14 @@ impl Pipeline {
                                 amount: self.config.commit_amount,
                                 tick: pending.reveal_send_at_tick,
                                 kind: RevealCommitKind::Reveal,
+                                pipeline_id: self.id,
                             };
 
                             console::log_info(format!(
                                 "pipeline[{id}] reveal+commit: now_tick={now_tick} next_reveal_tick={next_reveal_tick} amount={amount} commit={commit}",
                                 id = self.id,
                                 now_tick = tick.tick,
-                                next_reveal_tick = next_reveal_tick,
                                 amount = self.config.commit_amount,
-                                commit = commit
                             ));
                             if job_tx.send(reveal_job).await.is_err() {
                                 break;
@@ -289,7 +291,7 @@ pub async fn run_job_dispatcher(
             }
 
             let result = transport
-                .send_reveal_and_commit(job.input, job.amount, job.tick)
+                .send_reveal_and_commit(job.input, job.amount, job.tick, job.pipeline_id)
                 .await;
 
             match result {
@@ -651,6 +653,7 @@ mod tests {
             _input: RevealAndCommitInput,
             _amount: u64,
             _tick: u32,
+            _pipeline_id: usize,
         ) -> Result<String, TransportError> {
             let active = self.active.fetch_add(1, Ordering::Relaxed) + 1;
             self.max_active.fetch_max(active, Ordering::Relaxed);
@@ -682,6 +685,7 @@ mod tests {
                 amount: 1,
                 tick,
                 kind: RevealCommitKind::CommitOnly,
+                pipeline_id: 0,
             };
             job_tx.send(job).await.expect("send job");
         }
@@ -732,6 +736,7 @@ mod tests {
             amount: 1,
             tick: 1,
             kind: RevealCommitKind::CommitOnly,
+            pipeline_id: 0,
         };
         job_tx.send(job).await.expect("send job");
 
@@ -761,6 +766,7 @@ mod tests {
                 _input: RevealAndCommitInput,
                 _amount: u64,
                 _tick: u32,
+                _pipeline_id: usize,
             ) -> Result<String, TransportError> {
                 self.started.fetch_add(1, Ordering::Relaxed);
                 Err(TransportError {
@@ -784,6 +790,7 @@ mod tests {
                 amount: 1,
                 tick,
                 kind: RevealCommitKind::CommitOnly,
+                pipeline_id: 0,
             };
             job_tx.send(job).await.expect("send job");
         }
@@ -818,6 +825,7 @@ mod tests {
                 _input: RevealAndCommitInput,
                 amount: u64,
                 tick: u32,
+                _pipeline_id: usize,
             ) -> Result<String, TransportError> {
                 self.calls.lock().expect("lock calls").push((amount, tick));
                 Ok("tx".to_string())
@@ -875,6 +883,7 @@ mod tests {
                 _input: RevealAndCommitInput,
                 amount: u64,
                 tick: u32,
+                _pipeline_id: usize,
             ) -> Result<String, TransportError> {
                 self.calls.lock().expect("lock calls").push((amount, tick));
                 Ok("tx".to_string())

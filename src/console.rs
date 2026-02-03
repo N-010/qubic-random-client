@@ -95,6 +95,7 @@ fn log_with_level(level: &str, message: String) {
 }
 
 fn format_log_line(level: &str, status: &Status, message: &str) -> String {
+    let level = colorize_level(level);
     format!(
         "[{level}] tick={} balance={} reveal={} | {message}",
         status.tick, status.balance, status.reveal_ratio
@@ -122,6 +123,27 @@ fn format_reveal_ratio(success: u64, failed: u64) -> String {
 
     let percent = (success as f64) * 100.0 / (total as f64);
     format!("{percent:.1}% ({success}/{failed})")
+}
+
+fn colorize_level(level: &str) -> String {
+    const COLOR_GREEN: &str = "\x1b[32m";
+    const COLOR_YELLOW: &str = "\x1b[33m";
+    const COLOR_RED: &str = "\x1b[31m";
+    const COLOR_RESET: &str = "\x1b[0m";
+
+    if level.eq_ignore_ascii_case("INFO") {
+        return format!("{COLOR_GREEN}{level}{COLOR_RESET}");
+    }
+
+    if level.eq_ignore_ascii_case("WARN") || level.eq_ignore_ascii_case("WARNING") {
+        return format!("{COLOR_YELLOW}{level}{COLOR_RESET}");
+    }
+
+    if level.eq_ignore_ascii_case("ERROR") {
+        return format!("{COLOR_RED}{level}{COLOR_RESET}");
+    }
+
+    level.to_string()
 }
 
 #[cfg(test)]
@@ -160,7 +182,10 @@ mod tests {
             reveal_failed: 0,
         };
         let line = format_log_line("INFO", &status, "hello");
-        assert_eq!(line, "[INFO] tick=t balance=b reveal=r | hello");
+        assert_eq!(
+            line,
+            "[\u{1b}[32mINFO\u{1b}[0m] tick=t balance=b reveal=r | hello"
+        );
     }
 
     #[test]
