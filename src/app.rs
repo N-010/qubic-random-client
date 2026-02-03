@@ -112,7 +112,7 @@ async fn shutdown_pipelines(
         }
         if let Ok(Some(job)) = reply_rx.await
             && let Err(err) = transport
-                .send_reveal_and_commit(job.input, job.amount, job.tick)
+                .send_reveal_and_commit(job.input, job.amount, job.tick, job.pipeline_id)
                 .await
         {
             console::log_warn(format!("shutdown RevealAndCommit failed: {err}"));
@@ -218,6 +218,7 @@ mod tests {
             _input: RevealAndCommitInput,
             amount: u64,
             tick: u32,
+            _pipeline_id: usize,
         ) -> Result<String, TransportError> {
             self.calls.lock().expect("lock calls").push((amount, tick));
             Ok("tx".to_string())
@@ -240,6 +241,7 @@ mod tests {
                     amount: 0,
                     tick: 42,
                     kind: crate::pipeline::RevealCommitKind::Reveal,
+                    pipeline_id: 0,
                 }));
             }
         });
@@ -301,6 +303,7 @@ mod tests {
                 _input: RevealAndCommitInput,
                 _amount: u64,
                 _tick: u32,
+                _pipeline_id: usize,
             ) -> Result<String, TransportError> {
                 self.notify.notify_one();
                 Ok("tx".to_string())
