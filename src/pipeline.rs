@@ -54,7 +54,7 @@ fn current_tick_load(current_tick: &AtomicU64) -> Option<u32> {
 pub struct Pipeline {
     config: Config,
     pending: Option<PendingCommit>,
-    tick: TickInfo,
+    tick_info: TickInfo,
     id: usize,
     balance_state: Arc<BalanceState>,
 }
@@ -70,17 +70,14 @@ impl Pipeline {
         Self {
             config,
             pending: None,
-            tick: Default::default(),
+            tick_info: Default::default(),
             id,
             balance_state,
         }
     }
 
-    fn base_tick_offset(&self) -> u32 {
-        let pipeline_offset = u32::try_from(self.id).unwrap_or(u32::MAX);
-        self.config
-            .reveal_delay_ticks
-            .saturating_add(pipeline_offset)
+    fn id_tick_offset(&self) -> u32 {
+        u32::try_from(self.id).unwrap_or(u32::MAX)
     }
 
     pub async fn run(
@@ -96,7 +93,11 @@ impl Pipeline {
                         break;
                     };
                     let shutdown_job = self.pending.take().map(|pending| {
-                        let current_tick = self.tick.tick.saturating_add(self.base_tick_offset());
+                        let current_tick = self
+                            .tick_info
+                            .tick
+                            .saturating_add(self.config.reveal_delay_ticks)
+                            .saturating_add(self.id_tick_offset());
                         let reveal_tick = current_tick.max(pending.reveal_send_at_tick);
                         let committed_digest = commit_digest(&pending.revealed_bits);
                         let commit = format_commit(&committed_digest);
@@ -115,7 +116,7 @@ impl Pipeline {
                         console::log_info(format!(
                             "pipeline[{id}] shutdown reveal: now_tick={now_tick} reveal_tick={reveal_tick} amount=0 commit={commit}",
                             id = self.id,
-                            now_tick = self.tick.tick,
+                            now_tick = self.tick_info.tick,
                             reveal_tick = reveal_tick,
                             commit = commit
                         ));
@@ -125,14 +126,15 @@ impl Pipeline {
                     break;
                 }
                 event = tick_rx.recv() => {
-                    let tick = match event {
+                    let tick_info = match event {
                         Ok(tick) => tick,
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => break,
                     };
                     let reveal_delay = self.config.reveal_delay_ticks;
+                    let id_tick_offset = self.id_tick_offset();
 
-                    if tick.tick <= self.tick.tick {
+                    if tick_info.tick <= self.tick_info.tick {
                         continue;
                     }
 
@@ -151,13 +153,14 @@ impl Pipeline {
                         }
                     }
 
-                    self.tick = tick.clone();
+                    self.tick_info = tick_info.clone();
 
-                    match &self.pending {
+                    match &mut self.pending {
                         None => {
-                            let scheduled_tick = tick
+                            let scheduled_tick = tick_info
                                 .tick
-                                .saturating_add(self.base_tick_offset())
+                                .saturating_add(reveal_delay)
+                                .saturating_add(id_tick_offset)
                                 .saturating_add(self.config.reveal_send_guard_ticks);
                             let mut revealed_bits = [0u8; 512];
                             fill_secure_bits(&mut revealed_bits);
@@ -179,7 +182,7 @@ impl Pipeline {
                             console::log_info(format!(
                                 "pipeline[{id}] commit-only: now_tick={now_tick} commit_tick={commit_tick} amount={amount} commit={commit}",
                                 id = self.id,
-                                now_tick = tick.tick,
+                                now_tick = tick_info.tick,
                                 commit_tick = scheduled_tick,
                                 amount = self.config.commit_amount,
                                 commit = commit
@@ -195,7 +198,25 @@ impl Pipeline {
                         }
                         Some(pending) => {
                             let reveal_send_guard = self.config.reveal_send_guard_ticks;
-                            if tick.tick
+                            if tick_info.tick >= pending.reveal_send_at_tick {
+                                let rescheduled = tick_info
+                                    .tick
+                                    .saturating_add(reveal_delay)
+                                    .saturating_add(id_tick_offset)
+                                    .saturating_add(reveal_send_guard);
+
+                                console::record_reveal_result(false);
+                                console::log_warn(format!(
+                                    "pipeline[{id}] reschedule reveal: now_tick={now_tick} old_reveal_tick={old_reveal_tick} new_reveal_tick={new_reveal_tick}",
+                                    id = self.id,
+                                    now_tick = tick_info.tick,
+                                    old_reveal_tick = pending.reveal_send_at_tick,
+                                    new_reveal_tick = rescheduled
+                                ));
+                                pending.reveal_send_at_tick = rescheduled;
+                                continue;
+                            }
+                            if tick_info.tick
                                 < pending
                                     .reveal_send_at_tick
                                     .saturating_sub(reveal_send_guard)
@@ -203,7 +224,7 @@ impl Pipeline {
                                 console::log_info(format!(
                                     "pipeline[{id}] waiting: now_tick={now_tick} reveal_send_at_tick={reveal_send_at_tick}",
                                     id = self.id,
-                                    now_tick = tick.tick,
+                                    now_tick = tick_info.tick,
                                     reveal_send_at_tick = pending.reveal_send_at_tick,
                                 ));
                                 continue;
@@ -231,7 +252,7 @@ impl Pipeline {
                             console::log_info(format!(
                                 "pipeline[{id}] reveal+commit: now_tick={now_tick} next_reveal_tick={next_reveal_tick} amount={amount} commit={commit}",
                                 id = self.id,
-                                now_tick = tick.tick,
+                                now_tick = tick_info.tick,
                                 amount = self.config.commit_amount,
                             ));
                             if job_tx.send(reveal_job).await.is_err() {
@@ -574,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_offset_includes_pipeline_id() {
-        // base_tick_offset = reveal_delay + pipeline id.
+        // base_tick_offset = pipeline id.
         let config = test_config();
         let balance_state = Arc::new(BalanceState::new());
         balance_state.set_amount(100);
@@ -620,6 +641,52 @@ mod tests {
             .expect("shutdown");
         let job = reply_rx.await.expect("reply");
         assert!(job.is_none());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_reschedules_when_reveal_tick_passed() {
+        // If current tick surpasses reveal_send_at_tick, reschedule based on base offset + guard.
+        let mut config = test_config();
+        config.reveal_delay_ticks = 3;
+        config.reveal_send_guard_ticks = 2;
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let pipeline = Pipeline::new(config.clone(), 1, balance_state);
+        let (tick_tx, _) = broadcast::channel(4);
+        let tick_rx = tick_tx.subscribe();
+        let (pipeline_tx, pipeline_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_rx, pipeline_rx, job_tx));
+
+        tick_tx
+            .send(crate::ticks::TickInfo { epoch: 1, tick: 10 })
+            .expect("send tick");
+        let _ = with_timeout(Duration::from_millis(200), job_rx.recv())
+            .await
+            .expect("commit job");
+
+        // reveal_send_at_tick = 19 for pipeline id 1 (base offset 4).
+        tick_tx
+            .send(crate::ticks::TickInfo { epoch: 1, tick: 20 })
+            .expect("send tick");
+        let no_job = timeout(Duration::from_millis(20), job_rx.recv()).await;
+        assert!(no_job.is_err());
+
+        // Rescheduled reveal tick should be 26; send tick within guard window.
+        tick_tx
+            .send(crate::ticks::TickInfo { epoch: 1, tick: 24 })
+            .expect("send tick");
+        let job = with_timeout(Duration::from_millis(200), job_rx.recv())
+            .await
+            .expect("reveal job");
+        assert_eq!(job.tick, 26);
+        assert_eq!(job.kind, RevealCommitKind::Reveal);
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = pipeline_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await;
         handle.abort();
     }
 
@@ -673,8 +740,12 @@ mod tests {
         let transport = Arc::new(MockTransport::new(hold.clone(), started_tx));
         let current_tick = Arc::new(AtomicU64::new(0));
 
-        let dispatcher =
-            tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1, current_tick));
+        let dispatcher = tokio::spawn(run_job_dispatcher(
+            job_rx,
+            transport.clone(),
+            1,
+            current_tick,
+        ));
 
         for tick in [1u32, 2u32] {
             let job = RevealCommitJob {
@@ -725,8 +796,12 @@ mod tests {
         let transport = Arc::new(MockTransport::new(hold.clone(), started_tx));
         let current_tick = Arc::new(AtomicU64::new(0));
 
-        let dispatcher =
-            tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 0, current_tick));
+        let dispatcher = tokio::spawn(run_job_dispatcher(
+            job_rx,
+            transport.clone(),
+            0,
+            current_tick,
+        ));
 
         let job = RevealCommitJob {
             input: RevealAndCommitInput {
@@ -778,8 +853,12 @@ mod tests {
         let (job_tx, job_rx) = mpsc::channel(4);
         let transport = Arc::new(ErrorTransport::default());
         let current_tick = Arc::new(AtomicU64::new(0));
-        let dispatcher =
-            tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1, current_tick));
+        let dispatcher = tokio::spawn(run_job_dispatcher(
+            job_rx,
+            transport.clone(),
+            1,
+            current_tick,
+        ));
 
         for tick in [1u32, 2u32] {
             let job = RevealCommitJob {
@@ -834,8 +913,12 @@ mod tests {
 
         let transport = Arc::new(RecordingTransport::default());
         let current_tick = Arc::new(AtomicU64::new(0));
-        let dispatcher =
-            tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1, current_tick));
+        let dispatcher = tokio::spawn(run_job_dispatcher(
+            job_rx,
+            transport.clone(),
+            1,
+            current_tick,
+        ));
         let pipeline_handle = tokio::spawn(pipeline.run(tick_rx, pipeline_rx, job_tx));
 
         tick_tx
@@ -892,8 +975,12 @@ mod tests {
 
         let transport = Arc::new(RecordingTransport::default());
         let current_tick = Arc::new(AtomicU64::new(0));
-        let dispatcher =
-            tokio::spawn(run_job_dispatcher(job_rx, transport.clone(), 1, current_tick));
+        let dispatcher = tokio::spawn(run_job_dispatcher(
+            job_rx,
+            transport.clone(),
+            1,
+            current_tick,
+        ));
         let pipeline_handle = tokio::spawn(pipeline.run(tick_rx, pipeline_rx, job_tx));
 
         tick_tx

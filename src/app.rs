@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
+use std::sync::atomic::AtomicU64;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use std::sync::atomic::AtomicU64;
 
 use crate::balance::{BalanceState, run_balance_watcher};
 use crate::config::AppConfig;

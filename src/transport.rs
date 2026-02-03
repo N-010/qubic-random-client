@@ -186,7 +186,10 @@ impl ScTransport for ScapiContractTransport {
         let response = broadcast_transaction_with(&self.rpc, encoded)
             .await
             .map_err(|err| {
-                console::log_warn(format!("scapi tx[{pipeline_id}]: broadcast failed: {}", err));
+                console::log_warn(format!(
+                    "scapi tx[{pipeline_id}]: broadcast failed: {}",
+                    err
+                ));
                 TransportError {
                     message: format!("broadcast transaction failed: {}", err),
                 }
@@ -194,7 +197,7 @@ impl ScTransport for ScapiContractTransport {
 
         console::log_info(format!(
             "scapi tx[{pipeline_id}]: broadcast ok tx_id={tx}",
-            tx=console::shorten_id(&response.transaction_id)
+            tx = console::shorten_id(&response.transaction_id)
         ));
 
         Ok(response.transaction_id)
