@@ -6,6 +6,7 @@ mod entropy;
 mod heap_prof;
 mod pipeline;
 mod protocol;
+mod tick_data_watcher;
 mod ticks;
 mod transport;
 

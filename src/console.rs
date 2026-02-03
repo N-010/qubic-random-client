@@ -8,6 +8,7 @@ struct Status {
     tick_value: Option<u32>,
     reveal_success: u64,
     reveal_failed: u64,
+    reveal_empty: u64,
 }
 
 impl Default for Status {
@@ -19,6 +20,7 @@ impl Default for Status {
             tick_value: None,
             reveal_success: 0,
             reveal_failed: 0,
+            reveal_empty: 0,
         }
     }
 }
@@ -111,18 +113,38 @@ pub fn record_reveal_result(success: bool) {
         } else {
             status.reveal_failed = status.reveal_failed.saturating_add(1);
         }
-        status.reveal_ratio = format_reveal_ratio(status.reveal_success, status.reveal_failed);
+        status.reveal_ratio = format_reveal_ratio(
+            status.reveal_success,
+            status.reveal_failed,
+            status.reveal_empty,
+        );
     }
 }
 
-fn format_reveal_ratio(success: u64, failed: u64) -> String {
-    let total = success.saturating_add(failed);
+pub fn record_reveal_empty() {
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        status.reveal_empty = status.reveal_empty.saturating_add(1);
+        if status.reveal_success > 0 {
+            status.reveal_success = status.reveal_success.saturating_sub(1);
+        }
+        status.reveal_ratio = format_reveal_ratio(
+            status.reveal_success,
+            status.reveal_failed,
+            status.reveal_empty,
+        );
+    }
+}
+
+fn format_reveal_ratio(success: u64, failed: u64, empty: u64) -> String {
+    let total = success.saturating_add(failed).saturating_add(empty);
     if total == 0 {
         return "n/a".to_string();
     }
 
     let percent = (success as f64) * 100.0 / (total as f64);
-    format!("{percent:.1}% ({success}/{failed})")
+    format!("{percent:.1}% (ok={success} fail={failed} empty={empty})")
 }
 
 fn colorize_level(level: &str) -> String {
@@ -180,6 +202,7 @@ mod tests {
             tick_value: None,
             reveal_success: 0,
             reveal_failed: 0,
+            reveal_empty: 0,
         };
         let line = format_log_line("INFO", &status, "hello");
         assert_eq!(

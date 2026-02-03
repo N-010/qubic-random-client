@@ -1,99 +1,100 @@
-﻿# Как работать с клиентом Random
+﻿# How to work with the Random client
 
-Документ описывает запуск и практическую эксплуатацию клиента Random SC.
+This document describes how to run and operate the Random SC client.
 
-## Быстрый старт
+## Quick start
 
-1) Сборка:
+1) Build:
 
 ```bash
 cargo build
 ```
 
-2) Запуск (seed обязателен; по умолчанию stdin/TTY):
+2) Run (seed is required; default is stdin/TTY):
 
 ```bash
-cargo run -- --seed <55-символьный seed из a-z>
+cargo run -- --seed <55-char seed of a-z>
 ```
 
-Или просто запустите и введите seed (без отображения):
+Or just run and enter the seed (hidden input):
 
 ```bash
 cargo run
 ```
 
-## Требования к seed
+## Seed requirements
 
-- Длина: ровно 55 символов.
-- Допустимые символы: только `a-z` (строчные латинские).
-- Seed хранится в памяти в заблокированном буфере и затирается при выходе.
+- Length: exactly 55 characters.
+- Allowed characters: only `a-z` (lowercase latin).
+- The seed is kept in a locked memory buffer and zeroized on exit.
 
-## Основные параметры CLI
+## Main CLI parameters
 
-Клиент — бинарь `random-client` (см. `Cargo.toml`). Если `--seed` не указан, seed читается из stdin/TTY по умолчанию.
+The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not provided, the client reads from stdin/TTY by default.
 
 ```text
---seed <STRING>                Seed (55 символов a-z); если не указан, читается из stdin/TTY
---senders <N>                  Параллельные отправители Reveal/Commit: больше = быстрее отправка и выше нагрузка; 0 = авто (по ядрам)
---reveal-delay-ticks <N>       Сколько тиков ждать между commit и reveal (по умолчанию 3)
---reveal-send-guard-ticks <N>  На сколько тиков раньше планового reveal можно отправлять (по умолчанию 5)
---commit-amount <N>            Сумма депозита/ставки в каждой транзакции; влияет на риск и награду
---commit-reveal-pipeline-count <N> Количество параллельных pipeline commit/reveal (цепочек commit→reveal)
---runtime-threads <N>          Потоки Tokio для выполнения задач: больше = выше параллельность и нагрузка; 0 = авто (по числу логических ядер)
---heap-dump                    Снять heap-профиль jemalloc при старте
---heap-stats                   Печатать статистику аллокатора при завершении (Ctrl+C)
---heap-dump-interval-secs <N>  Интервал периодических heap-дампов в секундах (0 = отключено)
---tick-poll-interval-ms <N>    Как часто опрашивать текущий тик (мс)
---endpoint <URL>               RPC endpoint для запросов и отправки транзакций
---balance-interval-ms <N>      Интервал запроса баланса (мс)
+--seed <STRING>                Seed (55 chars a-z). If not provided, reads from stdin/TTY
+--senders <N>                  Number of transaction senders (default 3; 0 = auto)
+--reveal-delay-ticks <N>       Reveal delay relative to commit (default 3)
+--reveal-send-guard-ticks <N>  Guard ticks before reveal send (default 5)
+--commit-amount <N>            Deposit/stake amount (default 10000)
+--commit-reveal-pipeline-count <N> Number of parallel commit/reveal pipelines (default 3)
+--runtime-threads <N>          Tokio worker threads (default 0 = auto)
+--heap-dump                    Trigger a jemalloc heap profile dump at startup
+--heap-stats                   Print allocator stats on shutdown (Ctrl+C)
+--heap-dump-interval-secs <N>  Periodic heap dump interval in seconds (0 = disabled)
+--tick-poll-interval-ms <N>    Tick poll interval (default 300)
+--tick-data-check-interval-ms <N> Tick data check interval for reveal (ms)
+--endpoint <URL>               RPC endpoint (default https://rpc.qubic.org/live/v1/)
+--balance-interval-ms <N>      Balance print interval (default 300)
 ```
 
-## Heap-профилирование (jemalloc)
+## Heap profiling (jemalloc)
 
-- Сборка с jemalloc: `cargo build --features jemalloc`.
-- Включите профилирование до старта: `JEMALLOC_CONF=prof:true,prof_active:true,lg_prof_interval:30`.
-- Снять дамп при старте: `--heap-dump`, либо периодически: `--heap-dump-interval-secs`.
-- Печатать статистику аллокатора при завершении: `--heap-stats`.
-- Для пути дампов используйте `JEMALLOC_CONF=prof_prefix:/path/prefix`.
-- Профилирование jemalloc не поддерживается на MSVC.
+- Build with jemalloc enabled: `cargo build --features jemalloc`.
+- Enable profiling before start: `JEMALLOC_CONF=prof:true,prof_active:true,lg_prof_interval:30`.
+- Trigger a dump at startup with `--heap-dump`, or periodically with `--heap-dump-interval-secs`.
+- Print allocator stats on shutdown with `--heap-stats`.
+- Use `JEMALLOC_CONF=prof_prefix:/path/prefix` to control where dumps are written.
+- Jemalloc profiling is not supported on MSVC targets.
 
-## Статистика аллокатора на Windows (mimalloc)
+## Windows allocator stats (mimalloc)
 
-- Сборка с mimalloc: `cargo build --features mimalloc`.
-- Используйте `--heap-stats`, чтобы печатать статистику при завершении (например, Ctrl+C).
-- `MIMALLOC_SHOW_STATS=1` также печатает статистику при завершении.
-- Флаги `--heap-dump` требуют jemalloc и недоступны на MSVC.
+- Build with mimalloc enabled: `cargo build --features mimalloc`.
+- Use `--heap-stats` to print allocator stats on shutdown (e.g., Ctrl+C).
+- `MIMALLOC_SHOW_STATS=1` also prints stats on shutdown if set.
+- `--heap-dump` flags require jemalloc and are not available on MSVC.
 
-## Как работает pipeline
+## Pipeline behavior
 
-- Логика строится вокруг процедуры `RANDOM::RevealAndCommit()`.
-- Сначала отправляется commit (публикация digest), затем через `+3` тика — reveal + новый commit.
-- `revealedBits` раскрывают энтропию предыдущего commit, `committedDigest` — digest для следующего reveal.
-- Каждая транзакция отправляется с `commit_amount` (reveal-only не используется).
-- Если доступный баланс ниже `commit_amount`, pipeline приостанавливается.
-- Планирование транзакции делается на будущий тик: `current_tick + reveal_delay_ticks`.
-- Для защиты от не-раскрытия используется депозит: при commit депозит удерживается контрактом, при своевременном reveal возвращается; иначе — сгорает.
+- The logic is built around `RANDOM::RevealAndCommit()`.
+- First a commit is sent (publishing the digest), then after `+3` ticks a reveal + new commit.
+- `revealedBits` reveal the entropy for the previous commit, `committedDigest` is the digest for the next reveal.
+- Each transaction is sent with `commit_amount` (reveal-only is not used).
+- If available balance is below `commit_amount`, the pipeline pauses.
+- The transaction is scheduled for a future tick: `current_tick + reveal_delay_ticks`.
+- To prevent non-reveals, a deposit is used: on commit, the deposit is held by the contract; if revealed on time it is returned; otherwise it is forfeited.
 
-## Работа с RPC
+## RPC usage
 
-- Отправка транзакций происходит через RPC endpoint, указанный в `--endpoint`.
-- Запросы тика/баланса идут по SCAPI v0.2 (см. `docs/Architecture.md`).
+- Transactions are sent via the RPC endpoint specified in `--endpoint`.
+- Tick/balance queries use SCAPI v0.2 (see `docs/Architecture.md`).
 
-## Остановка клиента
+## Shutdown behavior
 
-- При завершении, если есть pending commit, клиент синхронно отправляет reveal перед выходом.
-- Reveal на выходе использует amount=0 и не делает новый commit.
+- On shutdown, if there is a pending commit, the client synchronously sends a reveal before exit.
+- The shutdown reveal uses amount=0 and does not create a new commit.
 
-## Типичные ошибки
+## Common errors
 
-- `seed from stdin is empty`: stdin/TTY оказался пустым.
-- `seed must be 55 characters`: неверная длина.
-- `seed must contain only a-z characters`: недопустимые символы.
-- Ошибки `VirtualLock/mlock`: система не дала закрепить память для seed.
+- `seed from stdin is empty`: stdin/TTY was empty.
+- `seed must be 55 characters`: invalid length.
+- `seed must contain only a-z characters`: invalid characters.
+- `VirtualLock/mlock` errors: the system failed to lock the seed memory.
 
-## Примеры
+## Examples
 
-Запуск с пользовательским endpoint и депозитом:
+Run with a custom endpoint and deposit:
 
 ```bash
 cargo run -- \
@@ -102,7 +103,7 @@ cargo run -- \
   --commit-amount 25000
 ```
 
-Запуск с авто-отправителями:
+Run with auto senders:
 
 ```bash
 cargo run -- --senders 0

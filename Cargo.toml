@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
-scapi = { git = "https://github.com/N-010/scapi", version = "0.2.5", rev = "57723772ea92e7ac54170b0f2ec706bdd5543805" }
+scapi = { git = "https://github.com/N-010/scapi", version = "0.2.5", rev = "fab2bf3d11eb9bb8a31c834a9bf614d8964f73b8" }
 async-trait = "0.1"
 atty = "0.2"
 base64 = "0.22"
