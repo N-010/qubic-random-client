@@ -3959,7 +3959,7 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 [[package]]
 name = "scapi"
 version = "0.2.5"
-source = "git+https://github.com/N-010/scapi?rev=57723772ea92e7ac54170b0f2ec706bdd5543805#57723772ea92e7ac54170b0f2ec706bdd5543805"
+source = "git+https://github.com/N-010/scapi?rev=fab2bf3d11eb9bb8a31c834a9bf614d8964f73b8#fab2bf3d11eb9bb8a31c834a9bf614d8964f73b8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
