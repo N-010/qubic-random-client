@@ -1,8 +1,9 @@
+use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
-
-use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -11,6 +12,7 @@ use crate::config::AppConfig;
 use crate::console;
 use crate::heap_prof;
 use crate::pipeline::{Pipeline, PipelineEvent, run_job_dispatcher};
+use crate::tick_data_watcher::TickDataWatcher;
 use crate::ticks::ScapiTickSource;
 use crate::transport::{ScTransport, ScapiClient, ScapiContractTransport, ScapiRpcClient};
 
@@ -54,14 +56,17 @@ async fn run_with_components(
     balance_state: Arc<BalanceState>,
     shutdown: impl std::future::Future<Output = AppResult<()>>,
 ) -> AppResult<()> {
-    let (tick_tx, mut tick_rx) = mpsc::channel(64);
+    let (tick_tx, _tick_rx) = broadcast::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
+    let (tick_data_tx, tick_data_rx) = mpsc::channel(256);
+    let current_tick = Arc::new(AtomicU64::new(0));
 
     let tick_source = ScapiTickSource::new(
         client.clone(),
         Duration::from_millis(runtime.tick_poll_interval_ms),
+        current_tick.clone(),
     );
-    tokio::spawn(tick_source.run(tick_tx));
+    tokio::spawn(tick_source.run(tick_tx.clone()));
 
     tokio::spawn(run_balance_watcher(
         client.clone(),
@@ -74,29 +79,27 @@ async fn run_with_components(
     let mut pipeline_txs = Vec::with_capacity(pipeline_count);
     for id in 0..pipeline_count {
         let (pipeline_tx, pipeline_rx) = mpsc::channel(64);
+        let tick_rx = tick_tx.subscribe();
         let pipeline = Pipeline::new(runtime.clone(), id, balance_state.clone());
-        tokio::spawn(pipeline.run(pipeline_rx, job_tx.clone()));
+        tokio::spawn(pipeline.run(tick_rx, pipeline_rx, job_tx.clone()));
         pipeline_txs.push(pipeline_tx);
     }
-
-    let forward_txs = pipeline_txs.clone();
-    tokio::spawn(async move {
-        let mut pipeline_txs = forward_txs;
-        while let Some(tick) = tick_rx.recv().await {
-            pipeline_txs.retain(|tx| !tx.is_closed());
-            for tx in &pipeline_txs {
-                if tx.send(PipelineEvent::Tick(tick.clone())).await.is_err() {
-                    // Dropped pipelines will be cleaned up on the next tick.
-                }
-            }
-        }
-    });
 
     tokio::spawn(run_job_dispatcher(
         job_rx,
         transport.clone(),
         runtime.senders,
+        current_tick.clone(),
+        tick_data_tx,
     ));
+    tokio::spawn(
+        TickDataWatcher::new(
+            current_tick.clone(),
+            tick_data_rx,
+            runtime.tick_data_check_interval_ms,
+        )
+        .run(),
+    );
 
     let result = shutdown.await;
     shutdown_pipelines(&pipeline_txs, transport.clone()).await;
@@ -119,7 +122,7 @@ async fn shutdown_pipelines(
         }
         if let Ok(Some(job)) = reply_rx.await
             && let Err(err) = transport
-                .send_reveal_and_commit(job.input, job.amount, job.tick)
+                .send_reveal_and_commit(job.input, job.amount, job.tick, job.pipeline_id)
                 .await
         {
             console::log_warn(format!("shutdown RevealAndCommit failed: {err}"));
@@ -225,6 +228,7 @@ mod tests {
             _input: RevealAndCommitInput,
             amount: u64,
             tick: u32,
+            _pipeline_id: usize,
         ) -> Result<String, TransportError> {
             self.calls.lock().expect("lock calls").push((amount, tick));
             Ok("tx".to_string())
@@ -246,6 +250,8 @@ mod tests {
                     },
                     amount: 0,
                     tick: 42,
+                    kind: crate::pipeline::RevealCommitKind::Reveal,
+                    pipeline_id: 0,
                 }));
             }
         });
@@ -307,6 +313,7 @@ mod tests {
                 _input: RevealAndCommitInput,
                 _amount: u64,
                 _tick: u32,
+                _pipeline_id: usize,
             ) -> Result<String, TransportError> {
                 self.notify.notify_one();
                 Ok("tx".to_string())
@@ -332,6 +339,7 @@ mod tests {
             tick_poll_interval_ms: 1,
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 1,
+            tick_data_check_interval_ms: 1,
         };
 
         let shutdown_notify = notify.clone();

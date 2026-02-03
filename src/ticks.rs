@@ -1,7 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio::time::sleep;
 
 use crate::console;
@@ -17,26 +18,33 @@ pub struct ScapiTickSource {
     client: Arc<dyn ScapiClient>,
     poll_interval: Duration,
     last: Option<(u32, u32)>,
+    current_tick: Arc<AtomicU64>,
 }
 
 impl ScapiTickSource {
-    pub fn new(client: Arc<dyn ScapiClient>, poll_interval: Duration) -> Self {
+    pub fn new(
+        client: Arc<dyn ScapiClient>,
+        poll_interval: Duration,
+        current_tick: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             client,
             poll_interval,
             last: None,
+            current_tick,
         }
     }
 
-    pub async fn run(mut self, tx: mpsc::Sender<TickInfo>) {
+    pub async fn run(mut self, tx: broadcast::Sender<TickInfo>) {
         loop {
             match self.client.get_tick_info().await {
                 Ok(info) => {
                     let key = (info.epoch, info.tick);
                     if self.last.is_none_or(|last| key > last) {
                         self.last = Some(key);
-                        console::set_tick_line(format!("{}", info.tick));
-                        if tx.send(info).await.is_err() {
+                        console::set_tick_value(info.tick);
+                        crate::pipeline::current_tick_store(&self.current_tick, info.tick);
+                        if tx.send(info).is_err() {
                             break;
                         }
                     }
@@ -56,9 +64,10 @@ mod tests {
     use crate::transport::{ScapiClient, TransportError};
     use async_trait::async_trait;
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tokio::sync::mpsc;
+    use tokio::sync::broadcast;
     use tokio::time::timeout;
 
     async fn with_timeout<T>(
@@ -111,8 +120,12 @@ mod tests {
             client.push_tick(Ok(TickInfo { epoch: 1, tick: 11 }));
             client.push_tick(Ok(TickInfo { epoch: 1, tick: 9 }));
 
-            let (tx, mut rx) = mpsc::channel(4);
-            let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
+            let (tx, mut rx) = broadcast::channel(4);
+            let tick_source = ScapiTickSource::new(
+                client,
+                Duration::from_millis(1),
+                Arc::new(AtomicU64::new(0)),
+            );
             let handle = tokio::spawn(tick_source.run(tx));
 
             let first = rx.recv().await.expect("first tick");
@@ -140,8 +153,12 @@ mod tests {
             }));
             client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
 
-            let (tx, mut rx) = mpsc::channel(4);
-            let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
+            let (tx, mut rx) = broadcast::channel(4);
+            let tick_source = ScapiTickSource::new(
+                client,
+                Duration::from_millis(1),
+                Arc::new(AtomicU64::new(0)),
+            );
             let handle = tokio::spawn(tick_source.run(tx));
 
             let tick = rx.recv().await.expect("tick");
@@ -160,8 +177,12 @@ mod tests {
             let client = Arc::new(MockClient::default());
             client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
 
-            let (tx, rx) = mpsc::channel(4);
-            let tick_source = ScapiTickSource::new(client, Duration::from_millis(1));
+            let (tx, rx) = broadcast::channel(4);
+            let tick_source = ScapiTickSource::new(
+                client,
+                Duration::from_millis(1),
+                Arc::new(AtomicU64::new(0)),
+            );
             let handle = tokio::spawn(tick_source.run(tx));
 
             drop(rx);

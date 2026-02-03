@@ -42,6 +42,7 @@ pub trait ScTransport: Send + Sync {
         input: RevealAndCommitInput,
         amount: u64,
         tick: u32,
+        pipeline_id: usize,
     ) -> Result<String, TransportError>;
 }
 
@@ -153,6 +154,7 @@ impl ScTransport for ScapiContractTransport {
         input: RevealAndCommitInput,
         amount: u64,
         tick: u32,
+        pipeline_id: usize,
     ) -> Result<String, TransportError> {
         if amount > 0 {
             let balance = self.balance_state.amount();
@@ -166,11 +168,8 @@ impl ScTransport for ScapiContractTransport {
         let payload = build_payload(&input);
 
         console::log_info(format!(
-            "scapi tx: build+send amount={amount} tick={tick} input_type={input_type} contract={contract_id}",
-            amount = amount,
-            tick = tick,
+            "scapi tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
             input_type = self.input_type,
-            contract_id = console::shorten_id(&self.contract_id.to_string())
         ));
 
         let tx_bytes = build_tx_bytes(
@@ -186,15 +185,18 @@ impl ScTransport for ScapiContractTransport {
         let response = broadcast_transaction_with(&self.rpc, encoded)
             .await
             .map_err(|err| {
-                console::log_warn(format!("scapi tx: broadcast failed: {}", err));
+                console::log_warn(format!(
+                    "scapi tx[{pipeline_id}]: broadcast failed: {}",
+                    err
+                ));
                 TransportError {
                     message: format!("broadcast transaction failed: {}", err),
                 }
             })?;
 
         console::log_info(format!(
-            "scapi tx: broadcast ok tx_id={}",
-            console::shorten_id(&response.transaction_id)
+            "scapi tx[{pipeline_id}]: broadcast ok tx_id={tx}",
+            tx = console::shorten_id(&response.transaction_id)
         ));
 
         Ok(response.transaction_id)
@@ -488,7 +490,7 @@ mod tests {
             committed_digest: [0u8; 32],
         };
         let err = transport
-            .send_reveal_and_commit(input, 1, 10)
+            .send_reveal_and_commit(input, 1, 10, 0)
             .await
             .expect_err("expected error");
         assert!(err.message.contains("insufficient balance"));
@@ -521,7 +523,7 @@ mod tests {
             committed_digest: [0u8; 32],
         };
         let err = transport
-            .send_reveal_and_commit(input, 1, 10)
+            .send_reveal_and_commit(input, 1, 10, 0)
             .await
             .expect_err("expected error");
         assert!(err.message.contains("broadcast transaction failed"));
@@ -556,7 +558,7 @@ mod tests {
             committed_digest: [0u8; 32],
         };
         let tx_id = transport
-            .send_reveal_and_commit(input, 1, 10)
+            .send_reveal_and_commit(input, 1, 10, 0)
             .await
             .expect("tx id");
         assert_eq!(tx_id, "tx123");
