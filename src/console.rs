@@ -169,6 +169,33 @@ fn colorize_level(level: &str) -> String {
 }
 
 #[cfg(test)]
+pub fn reveal_counts() -> (u64, u64, u64) {
+    STATUS
+        .get()
+        .and_then(|status| status.lock().ok())
+        .map(|status| {
+            (
+                status.reveal_success,
+                status.reveal_failed,
+                status.reveal_empty,
+            )
+        })
+        .unwrap_or((0, 0, 0))
+}
+
+#[cfg(test)]
+pub fn reset_reveal_stats() {
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        status.reveal_success = 0;
+        status.reveal_failed = 0;
+        status.reveal_empty = 0;
+        status.reveal_ratio = "n/a".to_string();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{STATUS, Status, format_amount, format_log_line, shorten_id};
 
@@ -224,5 +251,32 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(status.tick, "123");
         assert_eq!(status.balance, "456");
+    }
+
+    #[test]
+    fn reveal_ratio_formats_counts() {
+        super::init();
+        super::reset_reveal_stats();
+        super::record_reveal_result(true);
+        super::record_reveal_result(true);
+        super::record_reveal_result(false);
+        super::record_reveal_empty();
+
+        let status = STATUS
+            .get()
+            .and_then(|status| status.lock().ok())
+            .map(|status| status.clone())
+            .unwrap_or_default();
+        assert_eq!(status.reveal_ratio, "33.3% (ok=1 fail=1 empty=1)");
+    }
+
+    #[test]
+    fn reveal_empty_decrements_success_once() {
+        super::init();
+        super::reset_reveal_stats();
+        super::record_reveal_result(true);
+        super::record_reveal_empty();
+        let (ok, fail, empty) = super::reveal_counts();
+        assert_eq!((ok, fail, empty), (0, 0, 1));
     }
 }
