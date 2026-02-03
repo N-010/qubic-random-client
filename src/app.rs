@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use std::sync::atomic::AtomicU64;
 
 use crate::balance::{BalanceState, run_balance_watcher};
 use crate::config::AppConfig;
@@ -54,14 +56,16 @@ async fn run_with_components(
     balance_state: Arc<BalanceState>,
     shutdown: impl std::future::Future<Output = AppResult<()>>,
 ) -> AppResult<()> {
-    let (tick_tx, mut tick_rx) = mpsc::channel(64);
+    let (tick_tx, _tick_rx) = broadcast::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
+    let current_tick = Arc::new(AtomicU64::new(0));
 
     let tick_source = ScapiTickSource::new(
         client.clone(),
         Duration::from_millis(runtime.tick_poll_interval_ms),
+        current_tick.clone(),
     );
-    tokio::spawn(tick_source.run(tick_tx));
+    tokio::spawn(tick_source.run(tick_tx.clone()));
 
     tokio::spawn(run_balance_watcher(
         client.clone(),
@@ -74,28 +78,17 @@ async fn run_with_components(
     let mut pipeline_txs = Vec::with_capacity(pipeline_count);
     for id in 0..pipeline_count {
         let (pipeline_tx, pipeline_rx) = mpsc::channel(64);
+        let tick_rx = tick_tx.subscribe();
         let pipeline = Pipeline::new(runtime.clone(), id, balance_state.clone());
-        tokio::spawn(pipeline.run(pipeline_rx, job_tx.clone()));
+        tokio::spawn(pipeline.run(tick_rx, pipeline_rx, job_tx.clone()));
         pipeline_txs.push(pipeline_tx);
     }
-
-    let forward_txs = pipeline_txs.clone();
-    tokio::spawn(async move {
-        let mut pipeline_txs = forward_txs;
-        while let Some(tick) = tick_rx.recv().await {
-            pipeline_txs.retain(|tx| !tx.is_closed());
-            for tx in &pipeline_txs {
-                if tx.send(PipelineEvent::Tick(tick.clone())).await.is_err() {
-                    // Dropped pipelines will be cleaned up on the next tick.
-                }
-            }
-        }
-    });
 
     tokio::spawn(run_job_dispatcher(
         job_rx,
         transport.clone(),
         runtime.senders,
+        current_tick.clone(),
     ));
 
     let result = shutdown.await;
@@ -246,6 +239,7 @@ mod tests {
                     },
                     amount: 0,
                     tick: 42,
+                    kind: crate::pipeline::RevealCommitKind::Reveal,
                 }));
             }
         });
