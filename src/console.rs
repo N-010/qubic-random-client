@@ -1,9 +1,26 @@
 use std::sync::{Mutex, OnceLock};
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct Status {
     balance: String,
     tick: String,
+    reveal_ratio: String,
+    tick_value: Option<u32>,
+    reveal_success: u64,
+    reveal_failed: u64,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            balance: String::new(),
+            tick: String::new(),
+            reveal_ratio: "n/a".to_string(),
+            tick_value: None,
+            reveal_success: 0,
+            reveal_failed: 0,
+        }
+    }
 }
 
 static STATUS: OnceLock<Mutex<Status>> = OnceLock::new();
@@ -22,12 +39,12 @@ pub fn set_balance_line(line: impl Into<String>) {
     }
 }
 
-pub fn set_tick_line(line: impl Into<String>) {
-    let line = line.into();
+pub fn set_tick_value(tick: u32) {
     if let Some(status) = STATUS.get()
         && let Ok(mut status) = status.lock()
     {
-        status.tick = line;
+        status.tick = tick.to_string();
+        status.tick_value = Some(tick);
     }
 }
 
@@ -42,13 +59,12 @@ pub fn log_warn(message: impl Into<String>) {
 pub async fn shutdown() {}
 
 pub fn shorten_id(value: &str) -> String {
-    if value.len() <= 12 {
+    if value.len() <= 6 {
         return value.to_string();
     }
 
     let head = &value[..6];
-    let tail = &value[value.len() - 6..];
-    format!("{head}...{tail}")
+    head.to_string()
 }
 
 pub fn format_amount(amount: u64) -> String {
@@ -80,9 +96,32 @@ fn log_with_level(level: &str, message: String) {
 
 fn format_log_line(level: &str, status: &Status, message: &str) -> String {
     format!(
-        "[{level}] tick={} balance={} | {message}",
-        status.tick, status.balance
+        "[{level}] tick={} balance={} reveal={} | {message}",
+        status.tick, status.balance, status.reveal_ratio
     )
+}
+
+pub fn record_reveal_result(success: bool) {
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        if success {
+            status.reveal_success = status.reveal_success.saturating_add(1);
+        } else {
+            status.reveal_failed = status.reveal_failed.saturating_add(1);
+        }
+        status.reveal_ratio = format_reveal_ratio(status.reveal_success, status.reveal_failed);
+    }
+}
+
+fn format_reveal_ratio(success: u64, failed: u64) -> String {
+    let total = success.saturating_add(failed);
+    if total == 0 {
+        return "n/a".to_string();
+    }
+
+    let percent = (success as f64) * 100.0 / (total as f64);
+    format!("{percent:.1}% ({success}/{failed})")
 }
 
 #[cfg(test)]
@@ -98,7 +137,7 @@ mod tests {
     #[test]
     fn shorten_id_truncates_long_values() {
         // Long IDs are shortened to head...tail.
-        assert_eq!(shorten_id("abcdefghijklmnopqrstuvwxyz"), "abcdef...uvwxyz");
+        assert_eq!(shorten_id("abcdefghijklmnopqrstuvwxyz"), "abcdef");
     }
 
     #[test]
@@ -115,16 +154,20 @@ mod tests {
         let status = Status {
             balance: "b".to_string(),
             tick: "t".to_string(),
+            reveal_ratio: "r".to_string(),
+            tick_value: None,
+            reveal_success: 0,
+            reveal_failed: 0,
         };
         let line = format_log_line("INFO", &status, "hello");
-        assert_eq!(line, "[INFO] tick=t balance=b | hello");
+        assert_eq!(line, "[INFO] tick=t balance=b reveal=r | hello");
     }
 
     #[test]
     fn set_lines_update_status_snapshot() {
-        // set_tick_line / set_balance_line update shared status.
+        // set_tick_value / set_balance_line update shared status.
         super::init();
-        super::set_tick_line("123");
+        super::set_tick_value(123);
         super::set_balance_line("456");
         let status = STATUS
             .get()
