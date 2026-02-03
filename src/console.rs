@@ -1,7 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Clone)]
 struct Status {
@@ -38,6 +38,12 @@ static TEST_REVEAL_FAILED: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 static TEST_REVEAL_EMPTY: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+static TEST_RECORDING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init() {
     let _ = STATUS.set(Mutex::new(Status::default()));
@@ -133,7 +139,7 @@ pub fn record_reveal_result(success: bool) {
     }
 
     #[cfg(test)]
-    {
+    if TEST_RECORDING.load(Ordering::Relaxed) {
         if success {
             TEST_REVEAL_SUCCESS.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -158,7 +164,7 @@ pub fn record_reveal_empty() {
     }
 
     #[cfg(test)]
-    {
+    if TEST_RECORDING.load(Ordering::Relaxed) {
         TEST_REVEAL_EMPTY.fetch_add(1, Ordering::Relaxed);
         let _ = TEST_REVEAL_SUCCESS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             Some(value.saturating_sub(1))
@@ -223,6 +229,28 @@ pub fn reset_reveal_stats() {
 }
 
 #[cfg(test)]
+pub struct TestStatsGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestStatsGuard {
+    fn drop(&mut self) {
+        TEST_RECORDING.store(false, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+pub fn test_stats_guard() -> TestStatsGuard {
+    let lock = TEST_LOCK.lock().expect("test stats lock");
+    TEST_RECORDING.store(true, Ordering::Relaxed);
+    TEST_REVEAL_SUCCESS.store(0, Ordering::Relaxed);
+    TEST_REVEAL_FAILED.store(0, Ordering::Relaxed);
+    TEST_REVEAL_EMPTY.store(0, Ordering::Relaxed);
+    TestStatsGuard { _lock: lock }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{STATUS, Status, format_amount, format_log_line, shorten_id};
 
@@ -283,6 +311,7 @@ mod tests {
     #[test]
     fn reveal_ratio_formats_counts() {
         super::init();
+        let _guard = super::test_stats_guard();
         super::reset_reveal_stats();
         super::record_reveal_result(true);
         super::record_reveal_result(true);
@@ -300,6 +329,7 @@ mod tests {
     #[test]
     fn reveal_empty_decrements_success_once() {
         super::init();
+        let _guard = super::test_stats_guard();
         super::reset_reveal_stats();
         super::record_reveal_result(true);
         super::record_reveal_empty();
