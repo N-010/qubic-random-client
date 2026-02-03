@@ -16,7 +16,6 @@ const DEFAULT_BALANCE_INTERVAL_MS: u64 = 600;
 const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 10;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
-
 #[derive(Debug, Parser)]
 #[command(name = "random-client", version, about = "Random SC client")]
 pub struct Cli {

@@ -64,8 +64,8 @@ mod tests {
     use crate::transport::{ScapiClient, TransportError};
     use async_trait::async_trait;
     use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::broadcast;
     use tokio::time::timeout;
