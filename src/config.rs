@@ -14,6 +14,7 @@ const DEFAULT_REVEAL_SEND_GUARD_TICKS: u32 = 6;
 const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 600;
 const DEFAULT_BALANCE_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_CHECK_INTERVAL_MS: u64 = 600;
+const DEFAULT_TICK_DATA_MIN_DELAY_TICKS: u32 = 10;
 const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 10;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 
@@ -61,6 +62,9 @@ pub struct Cli {
 
     #[arg(long, default_value_t = DEFAULT_TICK_DATA_CHECK_INTERVAL_MS)]
     pub tick_data_check_interval_ms: u64,
+
+    #[arg(long, default_value_t = DEFAULT_TICK_DATA_MIN_DELAY_TICKS)]
+    pub tick_data_min_delay_ticks: u32,
 }
 
 pub struct Seed(LockedSeed);
@@ -106,6 +110,7 @@ pub struct Config {
     pub endpoint: String,
     pub balance_interval_ms: u64,
     pub tick_data_check_interval_ms: u64,
+    pub tick_data_min_delay_ticks: u32,
 }
 
 impl AppConfig {
@@ -148,6 +153,7 @@ impl AppConfig {
                 endpoint: cli.endpoint,
                 balance_interval_ms: cli.balance_interval_ms,
                 tick_data_check_interval_ms: cli.tick_data_check_interval_ms,
+                tick_data_min_delay_ticks: cli.tick_data_min_delay_ticks,
             },
         })
     }
@@ -326,6 +332,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
+            tick_data_min_delay_ticks: 10,
         };
         let result = resolve_seed(&cli, || Err("should not read".to_string()));
         assert_eq!(result.expect("seed"), "a".repeat(55));
@@ -349,6 +356,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
+            tick_data_min_delay_ticks: 10,
         };
         let err = resolve_seed(&cli, || Err("no seed".to_string())).expect_err("expected err");
         assert_eq!(err, "no seed");
@@ -388,6 +396,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
+            tick_data_min_delay_ticks: 10,
         };
         let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
         assert!(config.runtime.senders > 0);

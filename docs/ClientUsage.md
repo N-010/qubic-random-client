@@ -45,6 +45,7 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 --heap-dump-interval-secs <N>  Periodic heap dump interval in seconds (0 = disabled)
 --tick-poll-interval-ms <N>    Tick poll interval (default 300)
 --tick-data-check-interval-ms <N> Tick data check interval for reveal (ms)
+--tick-data-min-delay-ticks <N> Minimum tick delay before checking reveal tick data (default 10)
 --endpoint <URL>               RPC endpoint (default https://rpc.qubic.org/live/v1/)
 --balance-interval-ms <N>      Balance print interval (default 300)
 ```

@@ -97,6 +97,7 @@ async fn run_with_components(
             current_tick.clone(),
             tick_data_rx,
             runtime.tick_data_check_interval_ms,
+            runtime.tick_data_min_delay_ticks,
         )
         .run(),
     );
@@ -340,6 +341,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 1,
             tick_data_check_interval_ms: 1,
+            tick_data_min_delay_ticks: 1,
         };
 
         let shutdown_notify = notify.clone();
