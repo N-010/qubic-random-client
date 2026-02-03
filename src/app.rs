@@ -1,9 +1,8 @@
+use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-
-use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -13,6 +12,7 @@ use crate::config::AppConfig;
 use crate::console;
 use crate::heap_prof;
 use crate::pipeline::{Pipeline, PipelineEvent, run_job_dispatcher};
+use crate::tick_data_watcher::TickDataWatcher;
 use crate::ticks::ScapiTickSource;
 use crate::transport::{ScTransport, ScapiClient, ScapiContractTransport, ScapiRpcClient};
 
@@ -58,6 +58,7 @@ async fn run_with_components(
 ) -> AppResult<()> {
     let (tick_tx, _tick_rx) = broadcast::channel(64);
     let (job_tx, job_rx) = mpsc::channel(128);
+    let (tick_data_tx, tick_data_rx) = mpsc::channel(256);
     let current_tick = Arc::new(AtomicU64::new(0));
 
     let tick_source = ScapiTickSource::new(
@@ -89,7 +90,16 @@ async fn run_with_components(
         transport.clone(),
         runtime.senders,
         current_tick.clone(),
+        tick_data_tx,
     ));
+    tokio::spawn(
+        TickDataWatcher::new(
+            current_tick.clone(),
+            tick_data_rx,
+            runtime.tick_data_check_interval_ms,
+        )
+        .run(),
+    );
 
     let result = shutdown.await;
     shutdown_pipelines(&pipeline_txs, transport.clone()).await;
@@ -329,6 +339,7 @@ mod tests {
             tick_poll_interval_ms: 1,
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 1,
+            tick_data_check_interval_ms: 1,
         };
 
         let shutdown_notify = notify.clone();

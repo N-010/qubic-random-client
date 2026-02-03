@@ -168,9 +168,8 @@ impl ScTransport for ScapiContractTransport {
         let payload = build_payload(&input);
 
         console::log_info(format!(
-            "scapi tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type} contract={contract_id}",
+            "scapi tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
             input_type = self.input_type,
-            contract_id = console::shorten_id(&self.contract_id.to_string()),
         ));
 
         let tx_bytes = build_tx_bytes(
