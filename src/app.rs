@@ -126,6 +126,7 @@ async fn run_with_components(
             tick_data_rx,
             runtime.tick_data_check_interval_ms,
             tick_data_fetcher,
+            runtime.tick_data_min_delay_ticks,
         )
         .run(),
     );
@@ -379,6 +380,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 1,
             tick_data_check_interval_ms: 1,
+            tick_data_min_delay_ticks: 1,
             use_bob: false,
             bob_endpoint: "bob".to_string(),
         };

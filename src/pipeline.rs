@@ -384,6 +384,7 @@ mod tests {
             endpoint: "http://localhost".to_string(),
             balance_interval_ms: 1,
             tick_data_check_interval_ms: 1,
+            tick_data_min_delay_ticks: 1,
             use_bob: false,
             bob_endpoint: "bob".to_string(),
         }
@@ -751,6 +752,7 @@ mod tests {
     #[tokio::test]
     async fn reschedule_increments_fail_count() {
         console::init();
+        let _guard = console::test_stats_guard();
         console::reset_reveal_stats();
         reset_reschedule_count();
         let mut config = test_config();

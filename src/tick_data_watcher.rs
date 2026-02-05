@@ -19,6 +19,7 @@ pub struct TickDataWatcher {
     current_tick: Arc<AtomicU64>,
     tick_rx: mpsc::Receiver<u32>,
     interval_ms: u64,
+    min_delay_ticks: u32,
     fetcher: Arc<dyn TickDataFetcher>,
 }
 
@@ -27,12 +28,14 @@ impl TickDataWatcher {
         current_tick: Arc<AtomicU64>,
         tick_rx: mpsc::Receiver<u32>,
         interval_ms: u64,
+        min_delay_ticks: u32,
         fetcher: Arc<dyn TickDataFetcher>,
     ) -> Self {
         Self {
             current_tick,
             tick_rx,
             interval_ms,
+            min_delay_ticks,
             fetcher,
         }
     }
@@ -40,6 +43,7 @@ impl TickDataWatcher {
     pub async fn run(self) {
         let state = Arc::new(Mutex::new(State::default()));
         let interval_ms = self.interval_ms.max(1);
+        let min_delay = self.min_delay_ticks.max(1);
 
         let rx_state = state.clone();
         let mut tick_rx = self.tick_rx;
@@ -70,7 +74,7 @@ impl TickDataWatcher {
                     let mut ready = Vec::new();
                     let mut iter = state.ticks.iter().copied();
                     for tick in &mut iter {
-                        if current < tick.saturating_add(1) {
+                        if current < tick.saturating_add(min_delay) {
                             break;
                         }
                         ready.push(tick);
@@ -181,19 +185,29 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use tokio::sync::Mutex;
+    use tokio::sync::Notify;
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
     struct MockFetcher {
         calls: AtomicUsize,
         responses: Mutex<Vec<Result<Option<()>, String>>>,
+        notify: Option<Arc<Notify>>,
     }
 
     impl MockFetcher {
         fn new(responses: Vec<Result<Option<()>, String>>) -> Self {
+            Self::new_with_notify(responses, None)
+        }
+
+        fn new_with_notify(
+            responses: Vec<Result<Option<()>, String>>,
+            notify: Option<Arc<Notify>>,
+        ) -> Self {
             Self {
                 calls: AtomicUsize::new(0),
                 responses: Mutex::new(responses),
+                notify,
             }
         }
 
@@ -207,6 +221,9 @@ mod tests {
         async fn fetch(&self, _tick: u32) -> Result<Option<()>, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             let mut responses = self.responses.lock().await;
+            if let Some(notify) = &self.notify {
+                notify.notify_waiters();
+            }
             responses.pop().unwrap_or(Ok(Some(())))
         }
     }
@@ -214,40 +231,39 @@ mod tests {
     #[tokio::test]
     async fn tick_data_empty_decrements_success() {
         console::init();
+        let _guard = console::test_stats_guard();
         console::reset_reveal_stats();
         console::record_reveal_result(true);
-        let (_initial_ok, _initial_fail, initial_empty) = console::reveal_counts();
         let current_tick = Arc::new(AtomicU64::new(0));
         current_tick_store(&current_tick, 2);
         let (tx, rx) = mpsc::channel(4);
-        let fetcher = Arc::new(MockFetcher::new(vec![Ok(None)]));
-        let watcher = TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, fetcher);
+        let notify = Arc::new(Notify::new());
+        let fetcher = Arc::new(MockFetcher::new_with_notify(
+            vec![Ok(None)],
+            Some(notify.clone()),
+        ));
+        let watcher = TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, 1, fetcher);
         tokio::spawn(watcher.run());
 
         tx.send(1).await.expect("send");
-        timeout(Duration::from_millis(200), async {
-            loop {
-                let (_ok, _fail, empty) = console::reveal_counts();
-                if empty >= initial_empty.saturating_add(1) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("timeout");
+        timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .expect("timeout");
+        let (ok, _fail, empty) = console::reveal_counts();
+        assert_eq!((ok, empty), (0, 1));
     }
 
     #[tokio::test]
     async fn tick_data_ok_keeps_success() {
         console::init();
+        let _guard = console::test_stats_guard();
         console::reset_reveal_stats();
         console::record_reveal_result(true);
         let current_tick = Arc::new(AtomicU64::new(0));
         current_tick_store(&current_tick, 2);
         let (tx, rx) = mpsc::channel(4);
         let fetcher = Arc::new(MockFetcher::new(vec![Ok(Some(()))]));
-        let watcher = TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, fetcher);
+        let watcher = TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, 1, fetcher);
         tokio::spawn(watcher.run());
 
         tx.send(1).await.expect("send");
@@ -267,6 +283,7 @@ mod tests {
     #[tokio::test]
     async fn tick_not_ready_waits() {
         console::init();
+        let _guard = console::test_stats_guard();
         console::reset_reveal_stats();
         console::record_reveal_result(true);
         let current_tick = Arc::new(AtomicU64::new(0));
@@ -274,14 +291,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         let fetcher = Arc::new(MockFetcher::new(vec![Ok(Some(()))]));
         let watcher =
-            TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 10, fetcher.clone());
+            TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 10, 2, fetcher.clone());
         tokio::spawn(watcher.run());
 
         tx.send(1).await.expect("send");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(fetcher.calls(), 0);
 
-        current_tick_store(&current_tick, 2);
+        current_tick_store(&current_tick, 3);
         timeout(Duration::from_millis(200), async {
             loop {
                 if fetcher.calls() >= 1 {
@@ -297,6 +314,7 @@ mod tests {
     #[tokio::test]
     async fn deduplicates_ticks() {
         console::init();
+        let _guard = console::test_stats_guard();
         console::reset_reveal_stats();
         console::record_reveal_result(true);
         let current_tick = Arc::new(AtomicU64::new(0));
@@ -304,7 +322,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         let fetcher = Arc::new(MockFetcher::new(vec![Ok(Some(()))]));
         let watcher =
-            TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, fetcher.clone());
+            TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, 1, fetcher.clone());
         tokio::spawn(watcher.run());
 
         tx.send(1).await.expect("send");
@@ -325,6 +343,7 @@ mod tests {
     #[tokio::test]
     async fn retries_on_rpc_error() {
         console::init();
+        let _guard = console::test_stats_guard();
         console::reset_reveal_stats();
         console::record_reveal_result(true);
         let current_tick = Arc::new(AtomicU64::new(0));
@@ -335,7 +354,7 @@ mod tests {
             Err("boom".to_string()),
         ]));
         let watcher =
-            TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, fetcher.clone());
+            TickDataWatcher::new_with_fetcher(current_tick.clone(), rx, 1, 1, fetcher.clone());
         tokio::spawn(watcher.run());
 
         tx.send(1).await.expect("send");
