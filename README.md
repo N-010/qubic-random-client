@@ -18,6 +18,7 @@ architecture is in `docs/Architecture.md`, and the input structure is in
 ## Requirements
 - Rust (edition 2024).
 - Access to an RPC endpoint (default: `https://rpc.qubic.org/live/v1/`).
+- Optional Bob endpoint for JSON-RPC (default: `http://localhost:40420/qubic`).
 
 ## Build
 ```bash
@@ -49,6 +50,8 @@ If `--seed` is not provided, the seed is read from stdin/TTY.
 --heap-dump-interval-secs <n>      Periodic heap dump interval in seconds (0 = disabled)
 --tick-poll-interval-ms <ms>       Tick polling interval (default: 300)
 --endpoint <url>                   RPC endpoint
+--bob                              Use Bob JSON-RPC instead of standard RPC
+--bob-endpoint <url>               Bob endpoint (base or full URL, defaults to /qubic)
 --balance-interval-ms <ms>         Balance print interval (default: 300)
 ```
 
@@ -102,6 +105,12 @@ reduce latency but increase load on the endpoint.
 
 ### --endpoint
 RPC endpoint URL.
+
+### --bob
+Use Bob JSON-RPC for tick, balance, empty-tick checks, and transaction broadcast.
+
+### --bob-endpoint
+Bob JSON-RPC endpoint URL. You can pass the base URL (e.g. `http://host:40420`).
 
 ### --balance-interval-ms
 How often the balance is printed/logged. Smaller values produce more frequent

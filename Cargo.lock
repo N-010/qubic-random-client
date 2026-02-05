@@ -17,6 +17,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rpassword",
  "scapi",
+ "serde_json",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tiny-keccak",
@@ -3958,8 +3959,8 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 
 [[package]]
 name = "scapi"
-version = "0.2.5"
-source = "git+https://github.com/N-010/scapi?rev=fab2bf3d11eb9bb8a31c834a9bf614d8964f73b8#fab2bf3d11eb9bb8a31c834a9bf614d8964f73b8"
+version = "0.3.0"
+source = "git+https://github.com/N-010/scapi?rev=e0a8debd184df28696e1f47267c3dd981dc10294#e0a8debd184df28696e1f47267c3dd981dc10294"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

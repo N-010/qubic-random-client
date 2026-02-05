@@ -4,13 +4,14 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
-scapi = { git = "https://github.com/N-010/scapi", version = "0.2.5", rev = "fab2bf3d11eb9bb8a31c834a9bf614d8964f73b8" }
+scapi = { git = "https://github.com/N-010/scapi", version = "0.3.0", rev = "e0a8debd184df28696e1f47267c3dd981dc10294" }
 async-trait = "0.1"
 atty = "0.2"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 rand_core = "0.6.4"
 rpassword = "7"
+serde_json = "1"
 mimalloc = { version = "0.1", optional = true }
 libmimalloc-sys = { version = "0.1", optional = true, features = ["extended"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
