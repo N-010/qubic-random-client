@@ -75,15 +75,6 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
     .await
 }
 
-fn normalize_bob_endpoint(endpoint: &str) -> String {
-    let trimmed = endpoint.trim_end_matches('/');
-    if trimmed.ends_with("/qubic") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/qubic")
-    }
-}
-
 async fn run_with_components(
     runtime: crate::config::Config,
     identity: String,
