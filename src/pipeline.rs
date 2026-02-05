@@ -385,6 +385,8 @@ mod tests {
             balance_interval_ms: 1,
             tick_data_check_interval_ms: 1,
             tick_data_min_delay_ticks: 1,
+            use_bob: false,
+            bob_endpoint: "bob".to_string(),
         }
     }
 

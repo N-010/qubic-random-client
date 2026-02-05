@@ -178,8 +178,13 @@ fn format_reveal_ratio(success: u64, failed: u64, empty: u64) -> String {
         return "n/a".to_string();
     }
 
-    let percent = (success as f64) * 100.0 / (total as f64);
-    format!("{percent:.1}% (ok={success} fail={failed} empty={empty})")
+    let total_f = total as f64;
+    let ok_percent = (success as f64) * 100.0 / total_f;
+    let fail_percent = (failed as f64) * 100.0 / total_f;
+    let empty_percent = (empty as f64) * 100.0 / total_f;
+    format!(
+        "ok={success}({ok_percent:.1}%) fail={failed}({fail_percent:.1}%) empty={empty}({empty_percent:.1}%)"
+    )
 }
 
 fn colorize_level(level: &str) -> String {
@@ -323,7 +328,10 @@ mod tests {
             .and_then(|status| status.lock().ok())
             .map(|status| status.clone())
             .unwrap_or_default();
-        assert_eq!(status.reveal_ratio, "33.3% (ok=1 fail=1 empty=1)");
+        assert_eq!(
+            status.reveal_ratio,
+            "ok=1(33.3%) fail=1(33.3%) empty=1(33.3%)"
+        );
     }
 
     #[test]
