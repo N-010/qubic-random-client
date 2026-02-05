@@ -227,6 +227,16 @@ fn build_tx_bytes(
     })
 }
 
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn bob_balance_entry(result: &Value) -> Result<BalanceEntry, TransportError> {
     let mut asset = extract_string_field(result, &["id", "asset", "assetId", "asset_id"]);
     let mut amount =
@@ -349,7 +359,7 @@ impl ScTransport for BobContractTransport {
             payload,
         )?;
 
-        let encoded = BASE64_STANDARD.encode(tx_bytes);
+        let encoded = bytes_to_hex(&tx_bytes);
         let response = self
             .rpc
             .qubic_broadcast_transaction(encoded)
