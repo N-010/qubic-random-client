@@ -246,11 +246,18 @@ mod tests {
         tokio::spawn(watcher.run());
 
         tx.send(1).await.expect("send");
-        timeout(Duration::from_millis(200), notify.notified())
-            .await
-            .expect("timeout");
-        let (ok, _fail, empty) = console::reveal_counts();
-        assert_eq!((ok, empty), (0, 1));
+        timeout(Duration::from_millis(200), async {
+            notify.notified().await;
+            loop {
+                let (ok, _fail, empty) = console::reveal_counts();
+                if ok == 0 && empty == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("timeout");
     }
 
     #[tokio::test]
