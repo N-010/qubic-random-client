@@ -1,3 +1,4 @@
+use scapi::bob::BobRpcClient;
 use scapi::{QubicId as ScapiQubicId, QubicWallet as ScapiQubicWallet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -12,9 +13,12 @@ use crate::config::AppConfig;
 use crate::console;
 use crate::heap_prof;
 use crate::pipeline::{Pipeline, PipelineEvent, run_job_dispatcher};
-use crate::tick_data_watcher::TickDataWatcher;
+use crate::tick_data_watcher::{BobTickDataFetcher, TickDataFetcher, TickDataWatcher};
 use crate::ticks::ScapiTickSource;
-use crate::transport::{ScTransport, ScapiClient, ScapiContractTransport, ScapiRpcClient};
+use crate::transport::{
+    BobContractTransport, BobScapiClient, ScTransport, ScapiClient, ScapiContractTransport,
+    ScapiRpcClient,
+};
 
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -29,19 +33,42 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
     let identity = scapi_wallet.get_identity();
 
     let balance_state = Arc::new(BalanceState::new());
-    let client: Arc<dyn ScapiClient> = Arc::new(ScapiRpcClient::new(runtime.endpoint.clone()));
-    let transport: Arc<dyn ScTransport> = Arc::new(ScapiContractTransport::new(
-        runtime.endpoint.clone(),
-        scapi_wallet,
-        contract_id,
-        1,
-        balance_state.clone(),
-    ));
+    let (client, transport, tick_data_fetcher): (
+        Arc<dyn ScapiClient>,
+        Arc<dyn ScTransport>,
+        Arc<dyn TickDataFetcher>,
+    ) = if runtime.use_bob {
+        let bob_rpc = Arc::new(BobRpcClient::with_base_url(&runtime.bob_endpoint));
+        (
+            Arc::new(BobScapiClient::new(bob_rpc.clone())),
+            Arc::new(BobContractTransport::new(
+                bob_rpc.clone(),
+                scapi_wallet,
+                contract_id,
+                1,
+                balance_state.clone(),
+            )),
+            Arc::new(BobTickDataFetcher::new(bob_rpc)),
+        )
+    } else {
+        (
+            Arc::new(ScapiRpcClient::new(runtime.endpoint.clone())),
+            Arc::new(ScapiContractTransport::new(
+                runtime.endpoint.clone(),
+                scapi_wallet,
+                contract_id,
+                1,
+                balance_state.clone(),
+            )),
+            Arc::new(crate::tick_data_watcher::ScapiTickDataFetcher),
+        )
+    };
     run_with_components(
         runtime,
         identity,
         client,
         transport,
+        tick_data_fetcher,
         balance_state,
         wait_for_shutdown_signal(),
     )
@@ -53,6 +80,7 @@ async fn run_with_components(
     identity: String,
     client: Arc<dyn ScapiClient>,
     transport: Arc<dyn ScTransport>,
+    tick_data_fetcher: Arc<dyn TickDataFetcher>,
     balance_state: Arc<BalanceState>,
     shutdown: impl std::future::Future<Output = AppResult<()>>,
 ) -> AppResult<()> {
@@ -93,10 +121,11 @@ async fn run_with_components(
         tick_data_tx,
     ));
     tokio::spawn(
-        TickDataWatcher::new(
+        TickDataWatcher::new_with_fetcher(
             current_tick.clone(),
             tick_data_rx,
             runtime.tick_data_check_interval_ms,
+            tick_data_fetcher,
         )
         .run(),
     );
@@ -201,6 +230,7 @@ mod tests {
     use crate::balance::BalanceEntry;
     use crate::pipeline::PipelineEvent;
     use crate::protocol::RevealAndCommitInput;
+    use crate::tick_data_watcher::TickDataFetcher;
     use crate::ticks::TickInfo;
     use crate::transport::{ScTransport, TransportError};
     use async_trait::async_trait;
@@ -325,6 +355,15 @@ mod tests {
         let transport = Arc::new(NotifyTransport {
             notify: notify.clone(),
         });
+        #[derive(Debug)]
+        struct MockTickDataFetcher;
+
+        #[async_trait]
+        impl TickDataFetcher for MockTickDataFetcher {
+            async fn fetch(&self, _tick: u32) -> Result<Option<()>, String> {
+                Ok(Some(()))
+            }
+        }
 
         let runtime = crate::config::Config {
             senders: 1,
@@ -340,6 +379,8 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 1,
             tick_data_check_interval_ms: 1,
+            use_bob: false,
+            bob_endpoint: "bob".to_string(),
         };
 
         let shutdown_notify = notify.clone();
@@ -354,6 +395,7 @@ mod tests {
             "identity".to_string(),
             client,
             transport,
+            Arc::new(MockTickDataFetcher),
             balance_state,
             shutdown,
         )

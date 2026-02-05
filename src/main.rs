@@ -1,5 +1,6 @@
 mod app;
 mod balance;
+mod bob;
 mod config;
 mod console;
 mod entropy;

@@ -9,12 +9,15 @@ use crate::ticks::TickInfo;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use scapi::bob::BobRpcClient;
 use scapi::rpc::RpcClient;
 use scapi::rpc::get_balance_with;
 use scapi::rpc::get_tick_info_with;
 use scapi::rpc::post::broadcast_transaction_with;
 use scapi::{QubicId, QubicWallet, build_ticket_tx_bytes};
+use serde_json::Value;
 
+use crate::bob::{extract_result, extract_string_field, extract_u64_field, value_to_u64};
 use crate::console;
 #[derive(Debug)]
 pub struct TransportError {
@@ -58,6 +61,17 @@ impl ScapiRpcClient {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BobScapiClient {
+    rpc: Arc<BobRpcClient>,
+}
+
+impl BobScapiClient {
+    pub fn new(rpc: Arc<BobRpcClient>) -> Self {
+        Self { rpc }
+    }
+}
+
 #[async_trait]
 impl ScapiClient for ScapiRpcClient {
     async fn get_tick_info(&self) -> Result<TickInfo, TransportError> {
@@ -97,6 +111,45 @@ impl ScapiClient for ScapiRpcClient {
     }
 }
 
+#[async_trait]
+impl ScapiClient for BobScapiClient {
+    async fn get_tick_info(&self) -> Result<TickInfo, TransportError> {
+        let value = self
+            .rpc
+            .qubic_get_tick_number()
+            .await
+            .map_err(|err| TransportError {
+                message: format!("bob get tick failed: {err}"),
+            })?;
+        let result = extract_result(value).map_err(|err| TransportError { message: err })?;
+        let tick = value_to_u64(&result)
+            .or_else(|| {
+                extract_u64_field(&result, &["tickNumber", "tick", "number", "currentTick"])
+            })
+            .ok_or_else(|| TransportError {
+                message: format!("bob get tick missing tick number: {result}"),
+            })?;
+        let tick = u32::try_from(tick).map_err(|err| TransportError {
+            message: format!("bob tick out of range: {err}"),
+        })?;
+
+        Ok(TickInfo { epoch: 0, tick })
+    }
+
+    async fn get_balances(&self, identity: &str) -> Result<Vec<BalanceEntry>, TransportError> {
+        let value = self
+            .rpc
+            .qubic_get_balance(identity)
+            .await
+            .map_err(|err| TransportError {
+                message: format!("bob get balance failed: {err}"),
+            })?;
+        let result = extract_result(value).map_err(|err| TransportError { message: err })?;
+        let entry = bob_balance_entry(&result)?;
+        Ok(vec![entry])
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScapiContractTransport {
     rpc: RpcClient,
@@ -115,6 +168,33 @@ impl ScapiContractTransport {
         balance_state: Arc<BalanceState>,
     ) -> Self {
         let rpc = RpcClient::with_base_url(Cow::Owned(base_url));
+        Self {
+            rpc,
+            contract_id,
+            input_type,
+            wallet,
+            balance_state,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BobContractTransport {
+    rpc: Arc<BobRpcClient>,
+    contract_id: QubicId,
+    input_type: u16,
+    wallet: QubicWallet,
+    balance_state: Arc<BalanceState>,
+}
+
+impl BobContractTransport {
+    pub fn new(
+        rpc: Arc<BobRpcClient>,
+        wallet: QubicWallet,
+        contract_id: QubicId,
+        input_type: u16,
+        balance_state: Arc<BalanceState>,
+    ) -> Self {
         Self {
             rpc,
             contract_id,
@@ -145,6 +225,48 @@ fn build_tx_bytes(
             message: format!("failed to build transaction: {}", err),
         }
     })
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn bob_balance_entry(result: &Value) -> Result<BalanceEntry, TransportError> {
+    let mut asset = extract_string_field(result, &["id", "asset", "assetId", "asset_id"]);
+    let mut amount =
+        value_to_u64(result).or_else(|| extract_u64_field(result, &["balance", "amount", "value"]));
+
+    if let Value::Object(map) = result
+        && let Some(balance_value) = map.get("balance")
+    {
+        if amount.is_none() {
+            amount = value_to_u64(balance_value)
+                .or_else(|| extract_u64_field(balance_value, &["balance", "amount", "value"]));
+        }
+        if asset.is_none() {
+            asset = extract_string_field(balance_value, &["id", "asset", "assetId", "asset_id"]);
+        }
+    }
+
+    let amount = amount.ok_or_else(|| TransportError {
+        message: format!("bob balance response missing amount: {result}"),
+    })?;
+    let asset = asset.unwrap_or_else(|| "QUBIC".to_string());
+
+    Ok(BalanceEntry { asset, amount })
+}
+
+fn bob_tx_id(result: &Value) -> Option<String> {
+    result
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| extract_string_field(result, &["transactionId", "txId", "hash", "id"]))
 }
 
 #[async_trait]
@@ -200,6 +322,65 @@ impl ScTransport for ScapiContractTransport {
         ));
 
         Ok(response.transaction_id)
+    }
+}
+
+#[async_trait]
+impl ScTransport for BobContractTransport {
+    async fn send_reveal_and_commit(
+        &self,
+        input: RevealAndCommitInput,
+        amount: u64,
+        tick: u32,
+        pipeline_id: usize,
+    ) -> Result<String, TransportError> {
+        if amount > 0 {
+            let balance = self.balance_state.amount();
+            if balance < amount {
+                return Err(TransportError {
+                    message: format!("insufficient balance: have {balance} need {amount}"),
+                });
+            }
+        }
+
+        let payload = build_payload(&input);
+
+        console::log_info(format!(
+            "bob tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
+            input_type = self.input_type,
+        ));
+
+        let tx_bytes = build_tx_bytes(
+            &self.wallet,
+            self.contract_id,
+            amount,
+            tick,
+            self.input_type,
+            payload,
+        )?;
+
+        let encoded = bytes_to_hex(&tx_bytes);
+        let response = self
+            .rpc
+            .qubic_broadcast_transaction(encoded)
+            .await
+            .map_err(|err| {
+                console::log_warn(format!("bob tx[{pipeline_id}]: broadcast failed: {err}"));
+                TransportError {
+                    message: format!("broadcast transaction failed: {err}"),
+                }
+            })?;
+        let result = extract_result(response).map_err(|err| TransportError { message: err })?;
+        let tx = bob_tx_id(&result).ok_or_else(|| TransportError {
+            message: format!("broadcast transaction missing tx id: {result}"),
+        })?;
+
+        console::log_info(format!(
+            "bob tx[{pipeline_id}]: broadcast ok tx_id={tx}",
+            tx = console::shorten_id(&tx)
+        ));
+
+        Ok(tx)
     }
 }
 
