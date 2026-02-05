@@ -125,8 +125,8 @@ async fn run_with_components(
             current_tick.clone(),
             tick_data_rx,
             runtime.tick_data_check_interval_ms,
-            tick_data_fetcher,
             runtime.tick_data_min_delay_ticks,
+            tick_data_fetcher,
         )
         .run(),
     );
