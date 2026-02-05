@@ -4,11 +4,14 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use scapi::bob::BobRpcClient;
 use scapi::rpc::get_tick_data;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
+use crate::bob::extract_result;
 use crate::console;
 use crate::pipeline::current_tick_load;
 
@@ -20,19 +23,6 @@ pub struct TickDataWatcher {
 }
 
 impl TickDataWatcher {
-    pub fn new(
-        current_tick: Arc<AtomicU64>,
-        tick_rx: mpsc::Receiver<u32>,
-        interval_ms: u64,
-    ) -> Self {
-        Self::new_with_fetcher(
-            current_tick,
-            tick_rx,
-            interval_ms,
-            Arc::new(ScapiTickDataFetcher),
-        )
-    }
-
     pub fn new_with_fetcher(
         current_tick: Arc<AtomicU64>,
         tick_rx: mpsc::Receiver<u32>,
@@ -125,7 +115,7 @@ pub trait TickDataFetcher: Send + Sync {
     async fn fetch(&self, tick: u32) -> Result<Option<()>, String>;
 }
 
-struct ScapiTickDataFetcher;
+pub(crate) struct ScapiTickDataFetcher;
 
 #[async_trait]
 impl TickDataFetcher for ScapiTickDataFetcher {
@@ -134,6 +124,51 @@ impl TickDataFetcher for ScapiTickDataFetcher {
             .await
             .map(|response| response.tick_data.map(|_| ()))
             .map_err(|err| err.to_string())
+    }
+}
+
+pub(crate) struct BobTickDataFetcher {
+    client: Arc<BobRpcClient>,
+}
+
+impl BobTickDataFetcher {
+    pub fn new(client: Arc<BobRpcClient>) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl TickDataFetcher for BobTickDataFetcher {
+    async fn fetch(&self, tick: u32) -> Result<Option<()>, String> {
+        let filter = json!({
+            "identity": "",
+            "fromTick": tick,
+            "toTick": tick,
+        });
+        let response = self
+            .client
+            .qubic_get_transfers(filter)
+            .await
+            .map_err(|err| err.to_string())?;
+        let result = extract_result(response)?;
+        let transfers = match result {
+            Value::Array(items) => items,
+            Value::Object(map) => match map.get("transfers") {
+                Some(Value::Array(items)) => items.clone(),
+                _ => {
+                    return Err("bob transfers response missing transfers array".to_string());
+                }
+            },
+            _ => {
+                return Err("bob transfers response has unexpected shape".to_string());
+            }
+        };
+
+        if transfers.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(()))
+        }
     }
 }
 

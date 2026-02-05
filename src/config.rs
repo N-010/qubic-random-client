@@ -16,6 +16,7 @@ const DEFAULT_BALANCE_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_CHECK_INTERVAL_MS: u64 = 600;
 const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 10;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
+const DEFAULT_BOB_ENDPOINT: &str = scapi::bob::DEFAULT_BOB_RPC_ENDPOINT;
 
 #[derive(Debug, Parser)]
 #[command(name = "random-client", version, about = "Random SC client")]
@@ -61,6 +62,12 @@ pub struct Cli {
 
     #[arg(long, default_value_t = DEFAULT_TICK_DATA_CHECK_INTERVAL_MS)]
     pub tick_data_check_interval_ms: u64,
+
+    #[arg(long)]
+    pub bob: bool,
+
+    #[arg(long, default_value = DEFAULT_BOB_ENDPOINT)]
+    pub bob_endpoint: String,
 }
 
 pub struct Seed(LockedSeed);
@@ -106,6 +113,8 @@ pub struct Config {
     pub endpoint: String,
     pub balance_interval_ms: u64,
     pub tick_data_check_interval_ms: u64,
+    pub use_bob: bool,
+    pub bob_endpoint: String,
 }
 
 impl AppConfig {
@@ -148,6 +157,8 @@ impl AppConfig {
                 endpoint: cli.endpoint,
                 balance_interval_ms: cli.balance_interval_ms,
                 tick_data_check_interval_ms: cli.tick_data_check_interval_ms,
+                use_bob: cli.bob,
+                bob_endpoint: cli.bob_endpoint,
             },
         })
     }
@@ -326,6 +337,8 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
+            bob: false,
+            bob_endpoint: "bob".to_string(),
         };
         let result = resolve_seed(&cli, || Err("should not read".to_string()));
         assert_eq!(result.expect("seed"), "a".repeat(55));
@@ -349,6 +362,8 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
+            bob: false,
+            bob_endpoint: "bob".to_string(),
         };
         let err = resolve_seed(&cli, || Err("no seed".to_string())).expect_err("expected err");
         assert_eq!(err, "no seed");
@@ -388,6 +403,8 @@ mod tests {
             endpoint: "endpoint".to_string(),
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
+            bob: false,
+            bob_endpoint: "bob".to_string(),
         };
         let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
         assert!(config.runtime.senders > 0);
