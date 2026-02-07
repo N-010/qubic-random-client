@@ -153,7 +153,7 @@ async fn run_with_components(
         TickDataWatcher::new_with_fetcher(
             current_tick.clone(),
             tick_data_rx,
-            runtime.reveal_checks,
+            runtime.empty_tick_check_interval_ms,
             runtime.reveal_check_delay_ticks,
             tick_data_fetcher,
         )
@@ -408,7 +408,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             backend: crate::config::Backend::Rpc,
             balance_interval_ms: 1,
-            reveal_checks: 1,
+            empty_tick_check_interval_ms: 1,
             reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
