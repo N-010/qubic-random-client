@@ -41,7 +41,7 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 --pipeline-count <N> Number of parallel commit/reveal pipelines (default 3)
 --worker-threads <N>          Tokio worker threads (default 0 = auto)
 --tick-poll <N>    Tick poll interval (default 300)
---reveal-checks <N> Tick data check interval for reveal (ms)
+--empty-tick-check-interval-ms <N> Interval for checking whether reveal was sent into an empty tick (ms)
 --reveal-check-delay-ticks <N> Minimum tick delay before checking reveal tick data (default 10)
 --epoch-stop-lead-time-secs <N> Seconds before Wednesday 12:00 UTC when reveal/commit sending is stopped (default 600)
 --epoch-resume-delay-ticks <N> Minimum ticks from epoch initial tick before reveal/commit sending resumes (default 50)

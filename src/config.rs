@@ -13,7 +13,7 @@ const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
 const DEFAULT_REVEAL_SEND_GUARD_TICKS: u32 = 6;
 const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 1000;
 const DEFAULT_BALANCE_INTERVAL_MS: u64 = 600;
-const DEFAULT_TICK_DATA_CHECK_INTERVAL_MS: u64 = 600;
+const DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_MIN_DELAY_TICKS: u32 = 10;
 const DEFAULT_EPOCH_STOP_LEAD_TIME_SECS: u64 = 600;
 const DEFAULT_EPOCH_RESUME_DELAY_TICKS: u32 = 50;
@@ -61,8 +61,12 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_BALANCE_INTERVAL_MS)]
     pub balance_interval_ms: u64,
 
-    #[arg(long = "reveal-checks", default_value_t = DEFAULT_TICK_DATA_CHECK_INTERVAL_MS)]
-    pub reveal_checks: u64,
+    #[arg(
+        long = "empty-tick-check-interval-ms",
+        alias = "reveal-checks",
+        default_value_t = DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS
+    )]
+    pub empty_tick_check_interval_ms: u64,
 
     #[arg(
         long = "reveal-check-delay-ticks",
@@ -123,7 +127,7 @@ pub struct Config {
     pub endpoint: String,
     pub backend: Backend,
     pub balance_interval_ms: u64,
-    pub reveal_checks: u64,
+    pub empty_tick_check_interval_ms: u64,
     pub reveal_check_delay_ticks: u32,
     pub epoch_stop_lead_time_secs: u64,
     pub epoch_resume_delay_ticks: u32,
@@ -184,7 +188,7 @@ impl AppConfig {
                 endpoint: rpc_endpoint,
                 backend,
                 balance_interval_ms: cli.balance_interval_ms,
-                reveal_checks: cli.reveal_checks,
+                empty_tick_check_interval_ms: cli.empty_tick_check_interval_ms,
                 reveal_check_delay_ticks: cli.reveal_check_delay_ticks,
                 epoch_stop_lead_time_secs: cli.epoch_stop_lead_time_secs,
                 epoch_resume_delay_ticks: cli.epoch_resume_delay_ticks,
@@ -367,7 +371,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -392,7 +396,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -433,7 +437,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -458,7 +462,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -483,7 +487,7 @@ mod tests {
             tick_poll: 10,
             rpc: None,
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -507,7 +511,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -532,7 +536,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
