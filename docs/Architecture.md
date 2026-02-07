@@ -30,7 +30,7 @@
 ### Ключевые типы/трейты
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
-- `Config`: `senders`, `reveal_delay_ticks`, `commit_amount`, `commit_reveal_pipeline_count`, `runtime_threads`, `endpoint`, `balance_interval_ms`.
+- `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `endpoint`, `balance_interval_ms`.
 - `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
@@ -48,22 +48,35 @@
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
 - Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
-- CLI: seed via stdin/TTY by default; --seed overrides; --endpoint used for RPC; SC interaction via SCAPI RequestDataBuilder.
+- CLI: seed via stdin/TTY by default; --seed overrides; --rpc used for RPC; SC interaction via SCAPI RequestDataBuilder.
 - commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.
 
 ## Shutdown behavior (ASCII)
 - On shutdown, if there is a pending commit waiting to be revealed, the pipeline returns a self-reveal job to the main task.
-- The main task sends this reveal synchronously before exit (not via background senders) to avoid Ctrl-C races.
+- The main task sends this reveal synchronously before exit (not via background max_inflight_sends) to avoid Ctrl-C races.
 - This shutdown reveal uses amount=0 and sets committed_digest = K12(revealed_bits), so it does not create a new paid commit.
 - The shutdown reveal tick is max(pending.reveal_send_at_tick, current_tick + reveal_delay_ticks) to avoid using an outdated tick.
 
 ## Tick window for slow RPC polling (ASCII)
 - Problem: frequent tick polling can trigger RPC rate limits; lowering poll frequency risks missing the exact reveal tick.
 - Solution: use a configurable "send window" before the target reveal tick, so a late tick still triggers the send.
-- Config: `reveal_send_guard_ticks` defines the window size (e.g. 10 ticks). When `now_tick >= reveal_send_at_tick - guard`, the pipeline sends reveal+commit.
+- Config: `reveal_window_ticks` defines the window size (e.g. 10 ticks). When `now_tick >= reveal_send_at_tick - guard`, the pipeline sends reveal+commit.
 - The reveal/commit interval remains `reveal_delay_ticks` (default 3); only the allowable send time is widened.
-- Requirement: pick `reveal_send_guard_ticks` >= max expected tick polling gap to ensure at least one tick lands in the window.
+- Requirement: pick `reveal_window_ticks` >= max expected tick polling gap to ensure at least one tick lands in the window.
 
 ## Bob JSON-RPC (ASCII)
 - When `--bob` is set, the client uses Bob JSON-RPC for tick polling, balance, empty-tick checks, and transaction broadcast.
-- `--bob-endpoint` accepts a base URL (e.g. `http://host:40420`)).
+- `--bob` accepts an optional URL value right after the flag. If omitted, default Bob endpoint is used.
+
+## QubicLightNode gRPC (ASCII)
+- Backend selection:
+  - default: RPC,
+  - `--bob [url]` for Bob backend,
+  - `--grpc [url]` for QubicLightNode gRPC backend.
+- For `qln-grpc`, the client uses QubicLightNode gRPC for:
+  - tick polling (`GetStatus`),
+  - balance watcher (`GetBalance`),
+  - empty-tick checks (`GetTickTransactions`).
+- Current LightNode proto does not expose transaction broadcast, so send path remains SCAPI RPC (`--rpc`) in this mode.
+- `--grpc` can include endpoint URL right after the flag; if omitted, default is `http://127.0.0.1:50051`.
+

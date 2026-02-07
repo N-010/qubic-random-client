@@ -15,7 +15,7 @@ Both transactions send the configured commit amount (reveal-only is not used).
 Pipeline sleeps between ticks to reduce busy work.
 Pipeline pauses when available balance is below the configured commit amount.
 To tolerate slower tick polling, reveal is sent when current tick enters a configurable guard window
-before the target reveal tick (reveal_send_guard_ticks, e.g. 10 ticks).
+before the target reveal tick (reveal_window_ticks, e.g. 10 ticks).
 To prevent people from not revealing we require some security deposit to be placed, it's sent as amount
 When you commit you get security deposit held by SC, after revealing in time you get your money back, otherwise they are kept by SC forever
 You decide the amount yourself
@@ -24,3 +24,4 @@ Higher amount = higher reward.
 Client note:
 Transactions are signed and sent via the RPC broadcast-transaction endpoint.
 Tick is scheduled in the future (current tick + reveal_delay_ticks); reveal is scheduled at +3 from that tick.
+

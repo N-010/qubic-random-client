@@ -77,6 +77,7 @@ fn map_tick_info_response(response: scapi::rpc::get::TickInfoResponse) -> TickIn
     TickInfo {
         epoch: info.epoch,
         tick: info.tick,
+        initial_tick: info.initial_tick,
     }
 }
 
@@ -126,24 +127,13 @@ impl ScapiClient for BobScapiClient {
     async fn get_tick_info(&self) -> Result<TickInfo, TransportError> {
         let value = self
             .rpc
-            .qubic_get_tick_number()
+            .qubic_status()
             .await
             .map_err(|err| TransportError {
-                message: format!("bob get tick failed: {err}"),
+                message: format!("bob qubic_status failed: {err}"),
             })?;
         let result = extract_result(value).map_err(|err| TransportError { message: err })?;
-        let tick = value_to_u64(&result)
-            .or_else(|| {
-                extract_u64_field(&result, &["tickNumber", "tick", "number", "currentTick"])
-            })
-            .ok_or_else(|| TransportError {
-                message: format!("bob get tick missing tick number: {result}"),
-            })?;
-        let tick = u32::try_from(tick).map_err(|err| TransportError {
-            message: format!("bob tick out of range: {err}"),
-        })?;
-
-        Ok(TickInfo { epoch: 0, tick })
+        map_bob_status_tick_info(&result)
     }
 
     async fn get_balances(&self, identity: &str) -> Result<Vec<BalanceEntry>, TransportError> {
@@ -279,6 +269,37 @@ fn bob_tx_id(result: &Value) -> Option<String> {
         .or_else(|| extract_string_field(result, &["transactionId", "txId", "hash", "id"]))
 }
 
+fn map_bob_status_tick_info(result: &Value) -> Result<TickInfo, TransportError> {
+    let epoch =
+        extract_u64_field(result, &["currentProcessingEpoch"]).ok_or_else(|| TransportError {
+            message: format!("bob qubic_status missing epoch: {result}"),
+        })?;
+    let tick =
+        extract_u64_field(result, &["currentVerifyLoggingTick"]).ok_or_else(|| TransportError {
+            message: format!("bob qubic_status missing tick: {result}"),
+        })?;
+    let initial_tick =
+        extract_u64_field(result, &["initialTick"]).ok_or_else(|| TransportError {
+            message: format!("bob qubic_status missing initial tick: {result}"),
+        })?;
+
+    let epoch = u32::try_from(epoch).map_err(|err| TransportError {
+        message: format!("bob epoch out of range: {err}"),
+    })?;
+    let tick = u32::try_from(tick).map_err(|err| TransportError {
+        message: format!("bob tick out of range: {err}"),
+    })?;
+    let initial_tick = u32::try_from(initial_tick).map_err(|err| TransportError {
+        message: format!("bob initial tick out of range: {err}"),
+    })?;
+
+    Ok(TickInfo {
+        epoch,
+        tick,
+        initial_tick,
+    })
+}
+
 #[async_trait]
 impl ScTransport for ScapiContractTransport {
     async fn send_reveal_and_commit(
@@ -393,11 +414,15 @@ impl ScTransport for BobContractTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScTransport, ScapiContractTransport, build_payload, build_tx_bytes};
+    use super::{
+        ScTransport, ScapiContractTransport, build_payload, build_tx_bytes,
+        map_bob_status_tick_info,
+    };
     use crate::balance::BalanceState;
     use crate::protocol::RevealAndCommitInput;
     use scapi::rpc::get::{BalanceInfo, BalanceResponse, TickInfo, TickInfoResponse};
     use scapi::{QubicId, QubicWallet};
+    use serde_json::json;
     use std::str::FromStr;
     use std::sync::Arc;
 
@@ -427,6 +452,21 @@ mod tests {
         let info = super::map_tick_info_response(response);
         assert_eq!(info.tick, 12);
         assert_eq!(info.epoch, 3);
+        assert_eq!(info.initial_tick, 1);
+    }
+
+    #[test]
+    fn map_bob_status_tick_info_maps() {
+        let value = json!({
+            "currentProcessingEpoch": 9,
+            "currentVerifyLoggingTick": 12345,
+            "initialTick": 12300
+        });
+
+        let info = map_bob_status_tick_info(&value).expect("tick info");
+        assert_eq!(info.epoch, 9);
+        assert_eq!(info.tick, 12345);
+        assert_eq!(info.initial_tick, 12300);
     }
 
     #[test]

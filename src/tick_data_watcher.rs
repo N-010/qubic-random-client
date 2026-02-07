@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use scapi::bob::BobRpcClient;
-use scapi::rpc::get_tick_data;
+use scapi::rpc::RpcClient;
+use scapi::rpc::get_tick_data_with;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -119,12 +120,22 @@ pub trait TickDataFetcher: Send + Sync {
     async fn fetch(&self, tick: u32) -> Result<Option<()>, String>;
 }
 
-pub(crate) struct ScapiTickDataFetcher;
+pub(crate) struct ScapiTickDataFetcher {
+    rpc: RpcClient,
+}
+
+impl ScapiTickDataFetcher {
+    pub fn new(base_url: String) -> Self {
+        Self {
+            rpc: RpcClient::with_base_url(std::borrow::Cow::Owned(base_url)),
+        }
+    }
+}
 
 #[async_trait]
 impl TickDataFetcher for ScapiTickDataFetcher {
     async fn fetch(&self, tick: u32) -> Result<Option<()>, String> {
-        get_tick_data(tick)
+        get_tick_data_with(&self.rpc, tick)
             .await
             .map(|response| response.tick_data.map(|_| ()))
             .map_err(|err| err.to_string())
