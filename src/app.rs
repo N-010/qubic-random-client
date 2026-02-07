@@ -9,10 +9,10 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::balance::{BalanceState, run_balance_watcher};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, Backend};
 use crate::console;
-use crate::heap_prof;
 use crate::pipeline::{Pipeline, PipelineEvent, run_job_dispatcher};
+use crate::qln::{QlnGrpcClient, QlnScapiClient, QlnTickDataFetcher};
 use crate::tick_data_watcher::{BobTickDataFetcher, TickDataFetcher, TickDataWatcher};
 use crate::ticks::ScapiTickSource;
 use crate::transport::{
@@ -27,6 +27,13 @@ const DEFAULT_CONTRACT_ID: &str = "DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 pub async fn run(config: AppConfig) -> AppResult<()> {
     console::init();
     let AppConfig { seed, runtime } = config;
+    let backend_name = match runtime.backend {
+        Backend::Rpc => "rpc",
+        Backend::Bob => "bob",
+        Backend::QlnGrpc => "grpc",
+    };
+    console::set_backend(backend_name);
+    console::log_info(format!("backend selected: {backend_name}"));
     let scapi_wallet = wallet_from_seed(seed.expose())?;
     drop(seed);
     let contract_id = default_contract_id()?;
@@ -37,21 +44,41 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         Arc<dyn ScapiClient>,
         Arc<dyn ScTransport>,
         Arc<dyn TickDataFetcher>,
-    ) = if runtime.use_bob {
-        let bob_rpc = Arc::new(BobRpcClient::with_base_url(&runtime.bob_endpoint));
-        (
-            Arc::new(BobScapiClient::new(bob_rpc.clone())),
-            Arc::new(BobContractTransport::new(
-                bob_rpc.clone(),
-                scapi_wallet,
-                contract_id,
-                1,
-                balance_state.clone(),
-            )),
-            Arc::new(BobTickDataFetcher::new(bob_rpc)),
-        )
-    } else {
-        (
+    ) = match runtime.backend {
+        Backend::Bob => {
+            let bob_rpc = Arc::new(BobRpcClient::with_base_url(&runtime.bob_endpoint));
+            (
+                Arc::new(BobScapiClient::new(bob_rpc.clone())),
+                Arc::new(BobContractTransport::new(
+                    bob_rpc.clone(),
+                    scapi_wallet,
+                    contract_id,
+                    1,
+                    balance_state.clone(),
+                )),
+                Arc::new(BobTickDataFetcher::new(bob_rpc)),
+            )
+        }
+        Backend::QlnGrpc => {
+            let qln = Arc::new(QlnGrpcClient::new(&runtime.grpc_endpoint).map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("failed to create qln grpc client: {err}"),
+                )
+            })?);
+            (
+                Arc::new(QlnScapiClient::new(qln.clone())),
+                Arc::new(ScapiContractTransport::new(
+                    runtime.endpoint.clone(),
+                    scapi_wallet,
+                    contract_id,
+                    1,
+                    balance_state.clone(),
+                )),
+                Arc::new(QlnTickDataFetcher::new(qln)),
+            )
+        }
+        Backend::Rpc => (
             Arc::new(ScapiRpcClient::new(runtime.endpoint.clone())),
             Arc::new(ScapiContractTransport::new(
                 runtime.endpoint.clone(),
@@ -63,7 +90,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
             Arc::new(crate::tick_data_watcher::ScapiTickDataFetcher::new(
                 runtime.endpoint.clone(),
             )),
-        )
+        ),
     };
     run_with_components(
         runtime,
@@ -93,7 +120,7 @@ async fn run_with_components(
 
     let tick_source = ScapiTickSource::new(
         client.clone(),
-        Duration::from_millis(runtime.tick_poll_interval_ms),
+        Duration::from_millis(runtime.tick_poll),
         current_tick.clone(),
     );
     tokio::spawn(tick_source.run(tick_tx.clone()));
@@ -105,7 +132,7 @@ async fn run_with_components(
         balance_state.clone(),
     ));
 
-    let pipeline_count = runtime.commit_reveal_pipeline_count.max(1);
+    let pipeline_count = runtime.pipeline_count.max(1);
     let mut pipeline_txs = Vec::with_capacity(pipeline_count);
     for id in 0..pipeline_count {
         let (pipeline_tx, pipeline_rx) = mpsc::channel(64);
@@ -118,7 +145,7 @@ async fn run_with_components(
     let dispatcher_handle = tokio::spawn(run_job_dispatcher(
         job_rx,
         transport.clone(),
-        runtime.senders,
+        runtime.max_inflight_sends,
         current_tick.clone(),
         tick_data_tx,
     ));
@@ -126,8 +153,8 @@ async fn run_with_components(
         TickDataWatcher::new_with_fetcher(
             current_tick.clone(),
             tick_data_rx,
-            runtime.tick_data_check_interval_ms,
-            runtime.tick_data_min_delay_ticks,
+            runtime.reveal_checks,
+            runtime.reveal_check_delay_ticks,
             tick_data_fetcher,
         )
         .run(),
@@ -185,7 +212,6 @@ async fn wait_for_shutdown_signal() -> AppResult<()> {
             _ = ctrl_shutdown.recv() => {}
         }
 
-        heap_prof::on_shutdown();
         Ok(())
     }
 
@@ -205,14 +231,12 @@ async fn wait_for_shutdown_signal() -> AppResult<()> {
             _ = sighup.recv() => {}
         }
 
-        heap_prof::on_shutdown();
         Ok(())
     }
 
     #[cfg(not(any(windows, unix)))]
     {
         tokio::signal::ctrl_c().await?;
-        heap_prof::on_shutdown();
         Ok(())
     }
 }
@@ -374,24 +398,22 @@ mod tests {
         }
 
         let runtime = crate::config::Config {
-            senders: 1,
+            max_inflight_sends: 1,
             reveal_delay_ticks: 1,
-            reveal_send_guard_ticks: 2,
+            reveal_window_ticks: 2,
             commit_amount: 1,
-            commit_reveal_pipeline_count: 1,
-            runtime_threads: 1,
-            heap_dump: false,
-            heap_stats: false,
-            heap_dump_interval_secs: 0,
-            tick_poll_interval_ms: 1,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 1,
             endpoint: "endpoint".to_string(),
+            backend: crate::config::Backend::Rpc,
             balance_interval_ms: 1,
-            tick_data_check_interval_ms: 1,
-            tick_data_min_delay_ticks: 1,
+            reveal_checks: 1,
+            reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
-            use_bob: false,
             bob_endpoint: "bob".to_string(),
+            grpc_endpoint: "http://127.0.0.1:50051".to_string(),
         };
 
         let shutdown_notify = notify.clone();

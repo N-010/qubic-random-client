@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Clone)]
 struct Status {
+    backend: String,
     balance: String,
     epoch: String,
     tick: String,
@@ -18,6 +19,7 @@ struct Status {
 impl Default for Status {
     fn default() -> Self {
         Self {
+            backend: String::new(),
             balance: String::new(),
             epoch: String::new(),
             tick: String::new(),
@@ -58,6 +60,15 @@ pub fn set_balance_line(line: impl Into<String>) {
         && let Ok(mut status) = status.lock()
     {
         status.balance = line;
+    }
+}
+
+pub fn set_backend(value: impl Into<String>) {
+    let value = value.into();
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        status.backend = value;
     }
 }
 
@@ -120,8 +131,8 @@ fn log_with_level(level: &str, message: String) {
 fn format_log_line(level: &str, status: &Status, message: &str) -> String {
     let level = colorize_level(level);
     format!(
-        "[{level}] epoch={} tick={} balance={} reveal={} | {message}",
-        status.epoch, status.tick, status.balance, status.reveal_ratio
+        "[{level}] backend={} epoch={} tick={} balance={} reveal={} | {message}",
+        status.backend, status.epoch, status.tick, status.balance, status.reveal_ratio
     )
 }
 
@@ -286,6 +297,7 @@ mod tests {
     fn format_log_line_includes_status() {
         // Log line format includes epoch, tick and balance status.
         let status = Status {
+            backend: "rpc".to_string(),
             balance: "b".to_string(),
             epoch: "e".to_string(),
             tick: "t".to_string(),
@@ -298,7 +310,7 @@ mod tests {
         let line = format_log_line("INFO", &status, "hello");
         assert_eq!(
             line,
-            "[\u{1b}[32mINFO\u{1b}[0m] epoch=e tick=t balance=b reveal=r | hello"
+            "[\u{1b}[32mINFO\u{1b}[0m] backend=rpc epoch=e tick=t balance=b reveal=r | hello"
         );
     }
 

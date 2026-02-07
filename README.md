@@ -1,4 +1,4 @@
-﻿# Random Client
+# Random Client
 
 Client for the Random smart contract (SC) on the Qubic network. Implements the
 commit -> reveal cycle for the `RANDOM::RevealAndCommit()` procedure and sends
@@ -19,6 +19,7 @@ architecture is in `docs/Architecture.md`, and the input structure is in
 - Rust (edition 2024).
 - Access to an RPC endpoint (default: `https://rpc.qubic.org/live/v1/`).
 - Optional Bob endpoint for JSON-RPC (default: `http://localhost:40420/qubic`).
+- Optional QubicLightNode gRPC endpoint (default: `http://127.0.0.1:50051`).
 
 ## Build
 ```bash
@@ -39,20 +40,17 @@ If `--seed` is not provided, the seed is read from stdin/TTY.
 ## CLI options
 ```text
 --seed <seed>                      Seed (55 chars, a-z)
---senders <n>                      Number of senders (default: 3)
+--max-inflight-sends <n>                      Number of senders (default: 3)
 --reveal-delay-ticks <n>           Reveal delay in ticks (default: 3)
---reveal-send-guard-ticks <n>      Guard ticks before reveal send (default: 5)
+--reveal-window-ticks <n>      Guard ticks before reveal send (default: 5)
 --commit-amount <n>                Commit amount (default: 10000)
---commit-reveal-pipeline-count <n> Pipeline size (default: 3)
---runtime-threads <n>              Runtime threads (0 = auto)
---heap-dump                        Trigger a jemalloc heap profile dump at startup
---heap-stats                       Print allocator stats on shutdown (Ctrl+C)
---heap-dump-interval-secs <n>      Periodic heap dump interval in seconds (0 = disabled)
---tick-poll-interval-ms <ms>       Tick polling interval (default: 300)
---endpoint <url>                   RPC endpoint
---bob                              Use Bob JSON-RPC instead of standard RPC
---bob-endpoint <url>               Bob endpoint (base or full URL, defaults to /qubic)
---balance-interval-ms <ms>         Balance print interval (default: 300)
+--pipeline-count <n> Pipeline size (default: 3)
+--worker-threads <n>              Runtime threads (0 = auto)
+--tick-poll <ms>       Tick polling interval 
+--rpc [url]                        Use RPC endpoint (optional endpoint after flag)
+--bob [url]                        Use Bob JSON-RPC (optional endpoint after flag)
+--grpc [url]                       Use QubicLightNode gRPC (optional endpoint after flag)
+--balance-interval-ms <ms>         Balance print interval 
 ```
 
 ## Parameter details
@@ -60,7 +58,7 @@ If `--seed` is not provided, the seed is read from stdin/TTY.
 Required secret used to derive commits. Must be exactly 55 lowercase letters.
 Changing the seed changes all generated commits and reveals. Keep it private.
 
-### --senders
+### --max-inflight-sends
 Maximum number of concurrent RPC sends. Higher values increase throughput but
 also increase pressure on the RPC endpoint. Set to 1 for strictly sequential
 sending.
@@ -70,7 +68,7 @@ Base delay (in ticks) between a commit and its reveal. Larger values spread out
 reveal traffic and reduce overlap but increase the time until a reveal is sent.
 Smaller values make the cycle faster but can be less tolerant to network delays.
 
-### --reveal-send-guard-ticks
+### --reveal-window-ticks
 Guard window (in ticks) before the scheduled reveal tick. The pipeline waits
 until `now_tick >= reveal_send_at_tick - guard` before sending a reveal+commit.
 Larger values send reveals earlier; smaller values wait closer to the reveal
@@ -81,36 +79,32 @@ Amount sent with each commit/reveal transaction. If zero, balance checks are
 skipped and the pipeline still emits jobs. Larger values require more balance
 and can cause the pipeline to pause when funds are insufficient.
 
-### --commit-reveal-pipeline-count
+### --pipeline-count
 Number of parallel pipelines. Higher values increase throughput and staggering,
 but also increase concurrent in-flight commitments.
 
-### --runtime-threads
+### --worker-threads
 Tokio runtime worker threads. Use 0 for auto (based on CPU count). Higher values
 can improve concurrency on busy systems.
 
-### --heap-dump
-Triggers a jemalloc heap profile dump at startup (jemalloc builds only).
-
-### --heap-stats
-Prints allocator stats on shutdown (Ctrl+C). Works with jemalloc and mimalloc.
-
-### --heap-dump-interval-secs
-Periodic heap dump interval in seconds (jemalloc builds only). Set to 0 to
-disable periodic dumps.
-
-### --tick-poll-interval-ms
+### --tick-poll
 Polling interval for fetching tick info from the RPC endpoint. Smaller values
 reduce latency but increase load on the endpoint.
 
-### --endpoint
-RPC endpoint URL.
+### --rpc
+Use RPC endpoint for transaction broadcast and RPC-based reads.
+If URL is provided right after the flag, that URL is used.
+If URL is omitted, default is `https://rpc.qubic.org/live/v1/`.
 
 ### --bob
 Use Bob JSON-RPC for tick, balance, empty-tick checks, and transaction broadcast.
+If URL is provided right after the flag, that URL is used.
+If URL is omitted, default is `http://localhost:40420/qubic`.
 
-### --bob-endpoint
-Bob JSON-RPC endpoint URL. You can pass the base URL (e.g. `http://host:40420`).
+### --grpc
+Use QubicLightNode gRPC for tick, balance, and empty-tick checks.
+If URL is provided right after the flag, that URL is used.
+If URL is omitted, default is `http://127.0.0.1:50051`.
 
 ### --balance-interval-ms
 How often the balance is printed/logged. Smaller values produce more frequent
@@ -121,16 +115,5 @@ logging.
 - The seed is kept in locked memory and zeroized on shutdown.
 - On shutdown, a pending reveal is sent synchronously.
 
-## Heap profiling (jemalloc)
-- Build with jemalloc enabled: `cargo build --features jemalloc`.
-- Enable profiling before start: `JEMALLOC_CONF=prof:true,prof_active:true,lg_prof_interval:30`.
-- Trigger a dump at startup with `--heap-dump`, or periodically with `--heap-dump-interval-secs`.
-- Print allocator stats on shutdown with `--heap-stats`.
-- Use `JEMALLOC_CONF=prof_prefix:/path/prefix` to control where dumps are written.
-- Jemalloc profiling is not supported on MSVC targets.
 
-## Windows allocator stats (mimalloc)
-- Build with mimalloc enabled: `cargo build --features mimalloc`.
-- Use `--heap-stats` to print allocator stats on shutdown (e.g., Ctrl+C).
-- `MIMALLOC_SHOW_STATS=1` also prints stats on shutdown if set.
-- `--heap-dump` flags require jemalloc and are not available on MSVC.
+

@@ -202,7 +202,7 @@ impl Pipeline {
             .tick
             .saturating_add(reveal_delay)
             .saturating_add(self.id_tick_offset())
-            .saturating_add(self.config.reveal_send_guard_ticks);
+            .saturating_add(self.config.reveal_window_ticks);
         let mut revealed_bits = [0u8; 512];
         fill_secure_bits(&mut revealed_bits);
         let committed_digest = commit_digest(&revealed_bits);
@@ -243,7 +243,7 @@ impl Pipeline {
     ) -> bool {
         let id_tick_offset = self.id_tick_offset();
         let reveal_delay = self.config.reveal_delay_ticks;
-        let reveal_send_guard = self.config.reveal_send_guard_ticks;
+        let reveal_send_guard = self.config.reveal_window_ticks;
         let Some(pending) = self.pending.as_ref() else {
             return true;
         };
@@ -438,12 +438,12 @@ fn is_epoch_stop_window(now: chrono::DateTime<Utc>, stop_lead_time_secs: u64) ->
 pub async fn run_job_dispatcher(
     mut job_rx: mpsc::Receiver<RevealCommitJob>,
     transport: Arc<dyn ScTransport>,
-    senders: usize,
+    max_inflight_sends: usize,
     current_tick: CurrentTick,
     tick_data_tx: mpsc::Sender<u32>,
 ) {
-    let senders = senders.max(1);
-    let semaphore = Arc::new(Semaphore::new(senders));
+    let max_inflight_sends = max_inflight_sends.max(1);
+    let semaphore = Arc::new(Semaphore::new(max_inflight_sends));
     let mut tasks = JoinSet::new();
 
     while let Some(job) = job_rx.recv().await {
@@ -509,7 +509,7 @@ mod tests {
         is_epoch_stop_window, reschedule_count, reset_reschedule_count, run_job_dispatcher,
     };
     use crate::balance::BalanceState;
-    use crate::config::Config;
+    use crate::config::{Backend, Config};
     use crate::console;
     use crate::protocol::RevealAndCommitInput;
     use crate::transport::{ScTransport, TransportError};
@@ -534,24 +534,22 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
-            senders: 1,
+            max_inflight_sends: 1,
             reveal_delay_ticks: 3,
-            reveal_send_guard_ticks: 2,
+            reveal_window_ticks: 2,
             commit_amount: 10,
-            commit_reveal_pipeline_count: 1,
-            runtime_threads: 1,
-            heap_dump: false,
-            heap_stats: false,
-            heap_dump_interval_secs: 0,
-            tick_poll_interval_ms: 1,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 1,
             endpoint: "http://localhost".to_string(),
+            backend: Backend::Rpc,
             balance_interval_ms: 1,
-            tick_data_check_interval_ms: 1,
-            tick_data_min_delay_ticks: 1,
+            reveal_checks: 1,
+            reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
-            use_bob: false,
             bob_endpoint: "bob".to_string(),
+            grpc_endpoint: "http://127.0.0.1:50051".to_string(),
         }
     }
 
@@ -916,7 +914,7 @@ mod tests {
         console::reset_reveal_stats();
         let mut config = test_config();
         config.reveal_delay_ticks = 3;
-        config.reveal_send_guard_ticks = 2;
+        config.reveal_window_ticks = 2;
         let balance_state = Arc::new(BalanceState::new());
         balance_state.set_amount(100);
         let pipeline = Pipeline::new(config.clone(), 1, balance_state);
@@ -1033,7 +1031,7 @@ mod tests {
         reset_reschedule_count();
         let mut config = test_config();
         config.reveal_delay_ticks = 3;
-        config.reveal_send_guard_ticks = 2;
+        config.reveal_window_ticks = 2;
         let balance_state = Arc::new(BalanceState::new());
         balance_state.set_amount(100);
         let pipeline = Pipeline::new(config.clone(), 0, balance_state);
@@ -1182,7 +1180,7 @@ mod tests {
 
     #[tokio::test]
     async fn job_dispatcher_defaults_to_one_sender() {
-        // senders=0 should behave like senders=1.
+        // max_inflight_sends=0 should behave like max_inflight_sends=1.
         let (job_tx, job_rx) = mpsc::channel(4);
         let (started_tx, mut started_rx) = mpsc::channel(4);
         let hold = Arc::new(Semaphore::new(0));
