@@ -12,6 +12,7 @@ use crate::transport::ScapiClient;
 pub struct TickInfo {
     pub epoch: u32,
     pub tick: u32,
+    pub initial_tick: u32,
 }
 
 pub struct ScapiTickSource {
@@ -42,7 +43,7 @@ impl ScapiTickSource {
                     let key = (info.epoch, info.tick);
                     if self.last.is_none_or(|last| key > last) {
                         self.last = Some(key);
-                        console::set_tick_value(info.tick);
+                        console::set_tick_value(info.epoch, info.tick);
                         crate::pipeline::current_tick_store(&self.current_tick, info.tick);
                         if tx.send(info).is_err() {
                             break;
@@ -115,10 +116,26 @@ mod tests {
         // Only strictly increasing (epoch, tick) values should be forwarded.
         with_timeout(Duration::from_millis(200), async {
             let client = Arc::new(MockClient::default());
-            client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
-            client.push_tick(Ok(TickInfo { epoch: 1, tick: 10 }));
-            client.push_tick(Ok(TickInfo { epoch: 1, tick: 11 }));
-            client.push_tick(Ok(TickInfo { epoch: 1, tick: 9 }));
+            client.push_tick(Ok(TickInfo {
+                epoch: 1,
+                tick: 10,
+                initial_tick: 1,
+            }));
+            client.push_tick(Ok(TickInfo {
+                epoch: 1,
+                tick: 10,
+                initial_tick: 1,
+            }));
+            client.push_tick(Ok(TickInfo {
+                epoch: 1,
+                tick: 11,
+                initial_tick: 1,
+            }));
+            client.push_tick(Ok(TickInfo {
+                epoch: 1,
+                tick: 9,
+                initial_tick: 1,
+            }));
 
             let (tx, mut rx) = broadcast::channel(4);
             let tick_source = ScapiTickSource::new(
@@ -151,7 +168,11 @@ mod tests {
             client.push_tick(Err(TransportError {
                 message: "boom".to_string(),
             }));
-            client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
+            client.push_tick(Ok(TickInfo {
+                epoch: 1,
+                tick: 5,
+                initial_tick: 1,
+            }));
 
             let (tx, mut rx) = broadcast::channel(4);
             let tick_source = ScapiTickSource::new(
@@ -175,7 +196,11 @@ mod tests {
         // Closing the receiver should stop the source loop.
         with_timeout(Duration::from_millis(200), async {
             let client = Arc::new(MockClient::default());
-            client.push_tick(Ok(TickInfo { epoch: 1, tick: 5 }));
+            client.push_tick(Ok(TickInfo {
+                epoch: 1,
+                tick: 5,
+                initial_tick: 1,
+            }));
 
             let (tx, rx) = broadcast::channel(4);
             let tick_source = ScapiTickSource::new(

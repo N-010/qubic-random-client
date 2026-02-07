@@ -8,29 +8,26 @@ scapi = { git = "https://github.com/N-010/scapi", version = "0.3.0", rev = "e0a8
 async-trait = "0.1"
 atty = "0.2"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 rand_core = "0.6.4"
 rpassword = "7"
 serde_json = "1"
-mimalloc = { version = "0.1", optional = true }
-libmimalloc-sys = { version = "0.1", optional = true, features = ["extended"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tiny-keccak = { version = "2", features = ["k12"] }
+tonic = { version = "0.12", features = ["transport"] }
+prost = "0.13"
 zeroize = "1"
-
-[features]
-jemalloc = ["dep:tikv-jemalloc-ctl", "dep:tikv-jemallocator"]
-mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemalloc-ctl = { version = "0.6", optional = true, features = ["stats", "profiling", "use_std"] }
-tikv-jemallocator = { version = "0.6", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Memory"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"

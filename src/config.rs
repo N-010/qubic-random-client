@@ -15,9 +15,18 @@ const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 1000;
 const DEFAULT_BALANCE_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_CHECK_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_MIN_DELAY_TICKS: u32 = 10;
-const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 10;
-const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
+const DEFAULT_EPOCH_STOP_LEAD_TIME_SECS: u64 = 600;
+const DEFAULT_EPOCH_RESUME_DELAY_TICKS: u32 = 50;
+const DEFAULT_RPC_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 const DEFAULT_BOB_ENDPOINT: &str = scapi::bob::DEFAULT_BOB_RPC_ENDPOINT;
+const DEFAULT_GRPC_ENDPOINT: &str = "http://127.0.0.1:50051";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Rpc,
+    Bob,
+    QlnGrpc,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "random-client", version, about = "Random SC client")]
@@ -25,53 +34,53 @@ pub struct Cli {
     #[arg(long)]
     pub seed: Option<String>,
 
-    #[arg(long, default_value_t = DEFAULT_SENDERS)]
-    pub senders: usize,
+    #[arg(long = "max-inflight-sends", default_value_t = DEFAULT_SENDERS)]
+    pub max_inflight_sends: usize,
 
     #[arg(long, default_value_t = DEFAULT_REVEAL_DELAY_TICKS)]
     pub reveal_delay_ticks: u32,
 
-    #[arg(long, default_value_t = DEFAULT_REVEAL_SEND_GUARD_TICKS)]
-    pub reveal_send_guard_ticks: u32,
+    #[arg(long = "reveal-window-ticks", default_value_t = DEFAULT_REVEAL_SEND_GUARD_TICKS)]
+    pub reveal_window_ticks: u32,
 
     #[arg(long, default_value_t = DEFAULT_COMMIT_AMOUNT)]
     pub commit_amount: u64,
 
-    #[arg(long, default_value_t = DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT)]
-    pub commit_reveal_pipeline_count: usize,
+    #[arg(long = "pipeline-count", default_value_t = DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT)]
+    pub pipeline_count: usize,
 
-    #[arg(long, default_value_t = DEFAULT_RUNTIME_THREADS)]
-    pub runtime_threads: usize,
+    #[arg(long = "worker-threads", default_value_t = DEFAULT_RUNTIME_THREADS)]
+    pub worker_threads: usize,
 
-    #[arg(long)]
-    pub heap_dump: bool,
+    #[arg(long = "tick-poll", default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS)]
+    pub tick_poll: u64,
 
-    #[arg(long)]
-    pub heap_stats: bool,
-
-    #[arg(long, default_value_t = DEFAULT_HEAP_DUMP_INTERVAL_SECS)]
-    pub heap_dump_interval_secs: u64,
-
-    #[arg(long, default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS)]
-    pub tick_poll_interval_ms: u64,
-
-    #[arg(long, default_value = DEFAULT_ENDPOINT)]
-    pub endpoint: String,
+    #[arg(long, num_args = 0..=1, default_missing_value = DEFAULT_RPC_ENDPOINT)]
+    pub rpc: Option<String>,
 
     #[arg(long, default_value_t = DEFAULT_BALANCE_INTERVAL_MS)]
     pub balance_interval_ms: u64,
 
-    #[arg(long, default_value_t = DEFAULT_TICK_DATA_CHECK_INTERVAL_MS)]
-    pub tick_data_check_interval_ms: u64,
+    #[arg(long = "reveal-checks", default_value_t = DEFAULT_TICK_DATA_CHECK_INTERVAL_MS)]
+    pub reveal_checks: u64,
 
-    #[arg(long, default_value_t = DEFAULT_TICK_DATA_MIN_DELAY_TICKS)]
-    pub tick_data_min_delay_ticks: u32,
+    #[arg(
+        long = "reveal-check-delay-ticks",
+        default_value_t = DEFAULT_TICK_DATA_MIN_DELAY_TICKS
+    )]
+    pub reveal_check_delay_ticks: u32,
 
-    #[arg(long)]
-    pub bob: bool,
+    #[arg(long, default_value_t = DEFAULT_EPOCH_STOP_LEAD_TIME_SECS)]
+    pub epoch_stop_lead_time_secs: u64,
 
-    #[arg(long, default_value = DEFAULT_BOB_ENDPOINT)]
-    pub bob_endpoint: String,
+    #[arg(long, default_value_t = DEFAULT_EPOCH_RESUME_DELAY_TICKS)]
+    pub epoch_resume_delay_ticks: u32,
+
+    #[arg(long, num_args = 0..=1, default_missing_value = DEFAULT_BOB_ENDPOINT)]
+    pub bob: Option<String>,
+
+    #[arg(long, num_args = 0..=1, default_missing_value = DEFAULT_GRPC_ENDPOINT)]
+    pub grpc: Option<String>,
 }
 
 pub struct Seed(LockedSeed);
@@ -104,67 +113,83 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub senders: usize,
+    pub max_inflight_sends: usize,
     pub reveal_delay_ticks: u32,
-    pub reveal_send_guard_ticks: u32,
+    pub reveal_window_ticks: u32,
     pub commit_amount: u64,
-    pub commit_reveal_pipeline_count: usize,
-    pub runtime_threads: usize,
-    pub heap_dump: bool,
-    pub heap_stats: bool,
-    pub heap_dump_interval_secs: u64,
-    pub tick_poll_interval_ms: u64,
+    pub pipeline_count: usize,
+    pub worker_threads: usize,
+    pub tick_poll: u64,
     pub endpoint: String,
+    pub backend: Backend,
     pub balance_interval_ms: u64,
-    pub tick_data_check_interval_ms: u64,
-    pub tick_data_min_delay_ticks: u32,
-    pub use_bob: bool,
+    pub reveal_checks: u64,
+    pub reveal_check_delay_ticks: u32,
+    pub epoch_stop_lead_time_secs: u64,
+    pub epoch_resume_delay_ticks: u32,
     pub bob_endpoint: String,
+    pub grpc_endpoint: String,
 }
 
 impl AppConfig {
     pub fn from_cli() -> Result<Self, String> {
-        let cli = Cli::parse();
-        let seed_value = resolve_seed(&cli, read_seed_from_stdin)?;
+        let mut cli = Cli::parse();
+        let seed_value = resolve_seed(cli.seed.take(), read_seed_from_stdin)?;
         Self::from_cli_inner(cli, seed_value)
     }
 
     fn from_cli_inner(cli: Cli, seed_value: String) -> Result<Self, String> {
         let seed = Seed::new(seed_value)?;
-        let senders = if cli.senders == 0 {
+        let max_inflight_sends = if cli.max_inflight_sends == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
         } else {
-            cli.senders
+            cli.max_inflight_sends
         };
-        let runtime_threads = if cli.runtime_threads == 0 {
+        let worker_threads = if cli.worker_threads == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
         } else {
-            cli.runtime_threads
+            cli.worker_threads
         };
+
+        if cli.bob.is_some() && cli.grpc.is_some() {
+            return Err("--bob and --grpc cannot be used together".to_string());
+        }
+        let backend = if cli.bob.is_some() {
+            Backend::Bob
+        } else if cli.grpc.is_some() {
+            Backend::QlnGrpc
+        } else {
+            Backend::Rpc
+        };
+        let rpc_endpoint = cli.rpc.unwrap_or_else(|| DEFAULT_RPC_ENDPOINT.to_string());
+        let bob_endpoint = cli.bob.unwrap_or_else(|| DEFAULT_BOB_ENDPOINT.to_string());
+        let grpc_endpoint = cli
+            .grpc
+            .unwrap_or_else(|| DEFAULT_GRPC_ENDPOINT.to_string());
 
         Ok(Self {
             seed,
             runtime: Config {
-                senders,
+                max_inflight_sends,
                 reveal_delay_ticks: cli.reveal_delay_ticks,
-                reveal_send_guard_ticks: cli.reveal_send_guard_ticks,
+                reveal_window_ticks: cli.reveal_window_ticks,
                 commit_amount: cli.commit_amount,
-                commit_reveal_pipeline_count: cli.commit_reveal_pipeline_count,
-                runtime_threads,
-                heap_dump: cli.heap_dump,
-                heap_stats: cli.heap_stats,
-                heap_dump_interval_secs: cli.heap_dump_interval_secs,
-                tick_poll_interval_ms: cli.tick_poll_interval_ms,
-                endpoint: cli.endpoint,
+                pipeline_count: cli.pipeline_count,
+                worker_threads,
+                tick_poll: cli.tick_poll,
+                endpoint: rpc_endpoint,
+                backend,
                 balance_interval_ms: cli.balance_interval_ms,
-                tick_data_check_interval_ms: cli.tick_data_check_interval_ms,
-                tick_data_min_delay_ticks: cli.tick_data_min_delay_ticks,
-                use_bob: cli.bob,
-                bob_endpoint: cli.bob_endpoint,
+                reveal_checks: cli.reveal_checks,
+                reveal_check_delay_ticks: cli.reveal_check_delay_ticks,
+                epoch_stop_lead_time_secs: cli.epoch_stop_lead_time_secs,
+                epoch_resume_delay_ticks: cli.epoch_resume_delay_ticks,
+                bob_endpoint,
+                grpc_endpoint,
             },
         })
     }
@@ -180,11 +205,11 @@ fn validate_seed(seed: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_seed<F>(cli: &Cli, read_seed: F) -> Result<String, String>
+fn resolve_seed<F>(seed: Option<String>, read_seed: F) -> Result<String, String>
 where
     F: FnOnce() -> Result<String, String>,
 {
-    if let Some(seed) = cli.seed.clone() {
+    if let Some(seed) = seed {
         Ok(seed)
     } else {
         read_seed()
@@ -301,7 +326,10 @@ fn unlock_bytes(_bytes: &[u8]) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, Cli, Seed, read_seed_from_reader, resolve_seed, validate_seed};
+    use super::{
+        AppConfig, Backend, Cli, DEFAULT_BOB_ENDPOINT, DEFAULT_RPC_ENDPOINT, Seed,
+        read_seed_from_reader, resolve_seed, validate_seed,
+    };
     use std::io::Cursor;
 
     #[test]
@@ -330,24 +358,23 @@ mod tests {
         // When --seed is set, stdin must not be read.
         let cli = Cli {
             seed: Some("a".repeat(55)),
-            senders: 1,
+            max_inflight_sends: 1,
             reveal_delay_ticks: 3,
-            reveal_send_guard_ticks: 2,
+            reveal_window_ticks: 2,
             commit_amount: 10,
-            commit_reveal_pipeline_count: 1,
-            runtime_threads: 1,
-            heap_dump: false,
-            heap_stats: false,
-            heap_dump_interval_secs: 0,
-            tick_poll_interval_ms: 10,
-            endpoint: "endpoint".to_string(),
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            tick_data_check_interval_ms: 10,
-            tick_data_min_delay_ticks: 10,
-            bob: false,
-            bob_endpoint: "bob".to_string(),
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: None,
         };
-        let result = resolve_seed(&cli, || Err("should not read".to_string()));
+        let result = resolve_seed(cli.seed, || Err("should not read".to_string()));
         assert_eq!(result.expect("seed"), "a".repeat(55));
     }
 
@@ -356,24 +383,23 @@ mod tests {
         // If --seed is missing, the reader error must be propagated.
         let cli = Cli {
             seed: None,
-            senders: 1,
+            max_inflight_sends: 1,
             reveal_delay_ticks: 3,
-            reveal_send_guard_ticks: 2,
+            reveal_window_ticks: 2,
             commit_amount: 10,
-            commit_reveal_pipeline_count: 1,
-            runtime_threads: 1,
-            heap_dump: false,
-            heap_stats: false,
-            heap_dump_interval_secs: 0,
-            tick_poll_interval_ms: 10,
-            endpoint: "endpoint".to_string(),
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            tick_data_check_interval_ms: 10,
-            tick_data_min_delay_ticks: 10,
-            bob: false,
-            bob_endpoint: "bob".to_string(),
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: None,
         };
-        let err = resolve_seed(&cli, || Err("no seed".to_string())).expect_err("expected err");
+        let err = resolve_seed(cli.seed, || Err("no seed".to_string())).expect_err("expected err");
         assert_eq!(err, "no seed");
     }
 
@@ -394,30 +420,127 @@ mod tests {
     }
 
     #[test]
-    fn from_cli_inner_auto_threads_and_senders() {
+    fn from_cli_inner_auto_threads_and_max_inflight_sends() {
         // Zero values are replaced by available_parallelism.
         let cli = Cli {
             seed: None,
-            senders: 0,
+            max_inflight_sends: 0,
             reveal_delay_ticks: 3,
-            reveal_send_guard_ticks: 2,
+            reveal_window_ticks: 2,
             commit_amount: 10,
-            commit_reveal_pipeline_count: 1,
-            runtime_threads: 0,
-            heap_dump: false,
-            heap_stats: false,
-            heap_dump_interval_secs: 0,
-            tick_poll_interval_ms: 10,
-            endpoint: "endpoint".to_string(),
+            pipeline_count: 1,
+            worker_threads: 0,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            tick_data_check_interval_ms: 10,
-            tick_data_min_delay_ticks: 10,
-            bob: false,
-            bob_endpoint: "bob".to_string(),
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: None,
         };
         let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
-        assert!(config.runtime.senders > 0);
-        assert!(config.runtime.runtime_threads > 0);
+        assert!(config.runtime.max_inflight_sends > 0);
+        assert!(config.runtime.worker_threads > 0);
+    }
+
+    #[test]
+    fn from_cli_inner_uses_bob_default_endpoint() {
+        let cli = Cli {
+            seed: None,
+            max_inflight_sends: 1,
+            reveal_delay_ticks: 3,
+            reveal_window_ticks: 2,
+            commit_amount: 10,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
+            balance_interval_ms: 10,
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: Some(DEFAULT_BOB_ENDPOINT.to_string()),
+            grpc: None,
+        };
+        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
+        assert_eq!(config.runtime.backend, Backend::Bob);
+        assert_eq!(config.runtime.bob_endpoint, DEFAULT_BOB_ENDPOINT);
+    }
+
+    #[test]
+    fn from_cli_inner_uses_rpc_default_endpoint() {
+        let cli = Cli {
+            seed: None,
+            max_inflight_sends: 1,
+            reveal_delay_ticks: 3,
+            reveal_window_ticks: 2,
+            commit_amount: 10,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: None,
+            balance_interval_ms: 10,
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: None,
+        };
+        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
+        assert_eq!(config.runtime.endpoint, DEFAULT_RPC_ENDPOINT);
+    }
+
+    #[test]
+    fn from_cli_inner_uses_grpc_custom_endpoint() {
+        let cli = Cli {
+            seed: None,
+            max_inflight_sends: 1,
+            reveal_delay_ticks: 3,
+            reveal_window_ticks: 2,
+            commit_amount: 10,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
+            balance_interval_ms: 10,
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: Some("http://127.0.0.1:50052".to_string()),
+        };
+        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
+        assert_eq!(config.runtime.backend, Backend::QlnGrpc);
+        assert_eq!(config.runtime.grpc_endpoint, "http://127.0.0.1:50052");
+    }
+
+    #[test]
+    fn from_cli_inner_rejects_bob_and_grpc_together() {
+        let cli = Cli {
+            seed: None,
+            max_inflight_sends: 1,
+            reveal_delay_ticks: 3,
+            reveal_window_ticks: 2,
+            commit_amount: 10,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
+            balance_interval_ms: 10,
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: Some("http://127.0.0.1:40420/qubic".to_string()),
+            grpc: Some("http://127.0.0.1:50051".to_string()),
+        };
+        let err = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect_err("expected err");
+        assert_eq!(err, "--bob and --grpc cannot be used together");
     }
 
     #[test]

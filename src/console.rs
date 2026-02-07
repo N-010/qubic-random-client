@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Clone)]
 struct Status {
+    backend: String,
     balance: String,
+    epoch: String,
     tick: String,
     reveal_ratio: String,
     tick_value: Option<u32>,
@@ -17,7 +19,9 @@ struct Status {
 impl Default for Status {
     fn default() -> Self {
         Self {
+            backend: String::new(),
             balance: String::new(),
+            epoch: String::new(),
             tick: String::new(),
             reveal_ratio: "n/a".to_string(),
             tick_value: None,
@@ -59,10 +63,20 @@ pub fn set_balance_line(line: impl Into<String>) {
     }
 }
 
-pub fn set_tick_value(tick: u32) {
+pub fn set_backend(value: impl Into<String>) {
+    let value = value.into();
     if let Some(status) = STATUS.get()
         && let Ok(mut status) = status.lock()
     {
+        status.backend = value;
+    }
+}
+
+pub fn set_tick_value(epoch: u32, tick: u32) {
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        status.epoch = epoch.to_string();
         status.tick = tick.to_string();
         status.tick_value = Some(tick);
     }
@@ -117,8 +131,8 @@ fn log_with_level(level: &str, message: String) {
 fn format_log_line(level: &str, status: &Status, message: &str) -> String {
     let level = colorize_level(level);
     format!(
-        "[{level}] tick={} balance={} reveal={} | {message}",
-        status.tick, status.balance, status.reveal_ratio
+        "[{level}] backend={} epoch={} tick={} balance={} reveal={} | {message}",
+        status.backend, status.epoch, status.tick, status.balance, status.reveal_ratio
     )
 }
 
@@ -281,9 +295,11 @@ mod tests {
 
     #[test]
     fn format_log_line_includes_status() {
-        // Log line format includes tick and balance status.
+        // Log line format includes epoch, tick and balance status.
         let status = Status {
+            backend: "rpc".to_string(),
             balance: "b".to_string(),
+            epoch: "e".to_string(),
             tick: "t".to_string(),
             reveal_ratio: "r".to_string(),
             tick_value: None,
@@ -294,7 +310,7 @@ mod tests {
         let line = format_log_line("INFO", &status, "hello");
         assert_eq!(
             line,
-            "[\u{1b}[32mINFO\u{1b}[0m] tick=t balance=b reveal=r | hello"
+            "[\u{1b}[32mINFO\u{1b}[0m] backend=rpc epoch=e tick=t balance=b reveal=r | hello"
         );
     }
 
@@ -302,13 +318,14 @@ mod tests {
     fn set_lines_update_status_snapshot() {
         // set_tick_value / set_balance_line update shared status.
         super::init();
-        super::set_tick_value(123);
+        super::set_tick_value(7, 123);
         super::set_balance_line("456");
         let status = STATUS
             .get()
             .and_then(|status| status.lock().ok())
             .map(|status| status.clone())
             .unwrap_or_default();
+        assert_eq!(status.epoch, "7");
         assert_eq!(status.tick, "123");
         assert_eq!(status.balance, "456");
     }
