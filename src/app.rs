@@ -60,7 +60,9 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
                 1,
                 balance_state.clone(),
             )),
-            Arc::new(crate::tick_data_watcher::ScapiTickDataFetcher),
+            Arc::new(crate::tick_data_watcher::ScapiTickDataFetcher::new(
+                runtime.endpoint.clone(),
+            )),
         )
     };
     run_with_components(
@@ -113,7 +115,7 @@ async fn run_with_components(
         pipeline_txs.push(pipeline_tx);
     }
 
-    tokio::spawn(run_job_dispatcher(
+    let dispatcher_handle = tokio::spawn(run_job_dispatcher(
         job_rx,
         transport.clone(),
         runtime.senders,
@@ -133,6 +135,10 @@ async fn run_with_components(
 
     let result = shutdown.await;
     shutdown_pipelines(&pipeline_txs, transport.clone()).await;
+    drop(job_tx);
+    if let Err(err) = dispatcher_handle.await {
+        console::log_warn(format!("job dispatcher task failed: {err}"));
+    }
     console::shutdown().await;
     result
 }
@@ -318,6 +324,7 @@ mod tests {
                 Ok(TickInfo {
                     epoch: 1,
                     tick: *tick,
+                    initial_tick: 1,
                 })
             }
 
@@ -381,6 +388,8 @@ mod tests {
             balance_interval_ms: 1,
             tick_data_check_interval_ms: 1,
             tick_data_min_delay_ticks: 1,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 0,
             use_bob: false,
             bob_endpoint: "bob".to_string(),
         };

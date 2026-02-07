@@ -16,6 +16,8 @@ const DEFAULT_BALANCE_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_CHECK_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_MIN_DELAY_TICKS: u32 = 10;
 const DEFAULT_HEAP_DUMP_INTERVAL_SECS: u64 = 10;
+const DEFAULT_EPOCH_STOP_LEAD_TIME_SECS: u64 = 600;
+const DEFAULT_EPOCH_RESUME_DELAY_TICKS: u32 = 50;
 const DEFAULT_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
 const DEFAULT_BOB_ENDPOINT: &str = scapi::bob::DEFAULT_BOB_RPC_ENDPOINT;
 
@@ -66,6 +68,12 @@ pub struct Cli {
 
     #[arg(long, default_value_t = DEFAULT_TICK_DATA_MIN_DELAY_TICKS)]
     pub tick_data_min_delay_ticks: u32,
+
+    #[arg(long, default_value_t = DEFAULT_EPOCH_STOP_LEAD_TIME_SECS)]
+    pub epoch_stop_lead_time_secs: u64,
+
+    #[arg(long, default_value_t = DEFAULT_EPOCH_RESUME_DELAY_TICKS)]
+    pub epoch_resume_delay_ticks: u32,
 
     #[arg(long)]
     pub bob: bool,
@@ -118,14 +126,16 @@ pub struct Config {
     pub balance_interval_ms: u64,
     pub tick_data_check_interval_ms: u64,
     pub tick_data_min_delay_ticks: u32,
+    pub epoch_stop_lead_time_secs: u64,
+    pub epoch_resume_delay_ticks: u32,
     pub use_bob: bool,
     pub bob_endpoint: String,
 }
 
 impl AppConfig {
     pub fn from_cli() -> Result<Self, String> {
-        let cli = Cli::parse();
-        let seed_value = resolve_seed(&cli, read_seed_from_stdin)?;
+        let mut cli = Cli::parse();
+        let seed_value = resolve_seed(cli.seed.take(), read_seed_from_stdin)?;
         Self::from_cli_inner(cli, seed_value)
     }
 
@@ -163,6 +173,8 @@ impl AppConfig {
                 balance_interval_ms: cli.balance_interval_ms,
                 tick_data_check_interval_ms: cli.tick_data_check_interval_ms,
                 tick_data_min_delay_ticks: cli.tick_data_min_delay_ticks,
+                epoch_stop_lead_time_secs: cli.epoch_stop_lead_time_secs,
+                epoch_resume_delay_ticks: cli.epoch_resume_delay_ticks,
                 use_bob: cli.bob,
                 bob_endpoint: cli.bob_endpoint,
             },
@@ -180,11 +192,11 @@ fn validate_seed(seed: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_seed<F>(cli: &Cli, read_seed: F) -> Result<String, String>
+fn resolve_seed<F>(seed: Option<String>, read_seed: F) -> Result<String, String>
 where
     F: FnOnce() -> Result<String, String>,
 {
-    if let Some(seed) = cli.seed.clone() {
+    if let Some(seed) = seed {
         Ok(seed)
     } else {
         read_seed()
@@ -344,10 +356,12 @@ mod tests {
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
             tick_data_min_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
             bob: false,
             bob_endpoint: "bob".to_string(),
         };
-        let result = resolve_seed(&cli, || Err("should not read".to_string()));
+        let result = resolve_seed(cli.seed, || Err("should not read".to_string()));
         assert_eq!(result.expect("seed"), "a".repeat(55));
     }
 
@@ -370,10 +384,12 @@ mod tests {
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
             tick_data_min_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
             bob: false,
             bob_endpoint: "bob".to_string(),
         };
-        let err = resolve_seed(&cli, || Err("no seed".to_string())).expect_err("expected err");
+        let err = resolve_seed(cli.seed, || Err("no seed".to_string())).expect_err("expected err");
         assert_eq!(err, "no seed");
     }
 
@@ -412,6 +428,8 @@ mod tests {
             balance_interval_ms: 10,
             tick_data_check_interval_ms: 10,
             tick_data_min_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
             bob: false,
             bob_endpoint: "bob".to_string(),
         };

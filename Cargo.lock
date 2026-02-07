@@ -9,6 +9,7 @@ dependencies = [
  "async-trait",
  "atty",
  "base64 0.22.1",
+ "chrono",
  "clap",
  "libc",
  "libmimalloc-sys",

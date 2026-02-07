@@ -8,6 +8,7 @@ scapi = { git = "https://github.com/N-010/scapi", version = "0.3.0", rev = "e0a8
 async-trait = "0.1"
 atty = "0.2"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 rand_core = "0.6.4"
 rpassword = "7"

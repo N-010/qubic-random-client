@@ -46,6 +46,8 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 --tick-poll-interval-ms <N>    Tick poll interval (default 300)
 --tick-data-check-interval-ms <N> Tick data check interval for reveal (ms)
 --tick-data-min-delay-ticks <N> Minimum tick delay before checking reveal tick data (default 10)
+--epoch-stop-lead-time-secs <N> Seconds before Wednesday 12:00 UTC when reveal/commit sending is stopped (default 600)
+--epoch-resume-delay-ticks <N> Minimum ticks from epoch initial tick before reveal/commit sending resumes (default 50)
 --endpoint <URL>               RPC endpoint (default https://rpc.qubic.org/live/v1/)
 --balance-interval-ms <N>      Balance print interval (default 300)
 ```
@@ -75,6 +77,11 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 - If available balance is below `commit_amount`, the pipeline pauses.
 - The transaction is scheduled for a future tick: `current_tick + reveal_delay_ticks`.
 - To prevent non-reveals, a deposit is used: on commit, the deposit is held by the contract; if revealed on time it is returned; otherwise it is forfeited.
+- Sending is blocked during epoch stop window (Wednesday before `12:00 UTC`, controlled by `--epoch-stop-lead-time-secs`).
+- On entering stop window, if a reveal+commit pair is pending, the client sends only reveal with empty commit (`committed_digest = 0`, amount `0`), then blocks new reveal/commit sends.
+- Resume condition is `current_tick - initial_tick >= --epoch-resume-delay-ticks` and not being in the stop window.
+- After resume condition is met, pipeline continues with normal start (`empty reveal + commit`), then normal reveal+commit cycle.
+- `empty tick` checks and balance polling continue regardless of reveal/commit send pause.
 
 ## RPC usage
 
