@@ -250,7 +250,7 @@ fn validate_commit_amount(amount: u64) -> Result<(), String> {
 }
 
 fn validate_reveal_delay_ticks(reveal_delay_ticks: u32) -> Result<(), String> {
-    if reveal_delay_ticks > 0 && reveal_delay_ticks % 3 == 0 {
+    if reveal_delay_ticks > 0 && reveal_delay_ticks.is_multiple_of(3) {
         return Ok(());
     }
 
@@ -598,7 +598,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("127.0.0.1:21841".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -630,7 +630,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -654,7 +654,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("endpoint".to_string()),
             balance_interval_ms: 10,
-            reveal_checks: 10,
+            empty_tick_check_interval_ms: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
