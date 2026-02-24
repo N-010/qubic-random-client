@@ -544,7 +544,7 @@ mod tests {
             endpoint: "http://localhost".to_string(),
             backend: Backend::Rpc,
             balance_interval_ms: 1,
-            reveal_checks: 1,
+            empty_tick_check_interval_ms: 1,
             reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
