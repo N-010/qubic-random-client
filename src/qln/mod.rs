@@ -1,13 +1,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use scapi::{QubicId, QubicWallet};
 use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
 
-use crate::balance::BalanceEntry;
+use crate::balance::{BalanceEntry, BalanceState};
+use crate::console;
+use crate::protocol::RevealAndCommitInput;
 use crate::tick_data_watcher::TickDataFetcher;
 use crate::ticks::TickInfo;
-use crate::transport::{ScapiClient, TransportError};
+use crate::transport::{
+    ScTransport, ScapiClient, TransportError, build_reveal_and_commit_tx_bytes,
+    ensure_amount_available,
+};
 
 pub mod lightnodepb {
     tonic::include_proto!("lightnode");
@@ -60,6 +66,20 @@ impl QlnGrpcClient {
             .map(|response| response.into_inner())
             .map_err(|err| format!("gRPC get_tick_transactions failed: {err}"))
     }
+
+    async fn broadcast_transaction(
+        &self,
+        tx_bytes: Vec<u8>,
+    ) -> Result<lightnodepb::BroadcastTransactionResponse, String> {
+        let mut client = self.inner.clone();
+        client
+            .broadcast_transaction(Request::new(lightnodepb::BroadcastTransactionRequest {
+                tx_bytes,
+            }))
+            .await
+            .map(|response| response.into_inner())
+            .map_err(|err| format!("gRPC broadcast_transaction failed: {err}"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +101,33 @@ pub struct QlnTickDataFetcher {
 impl QlnTickDataFetcher {
     pub fn new(grpc: Arc<QlnGrpcClient>) -> Self {
         Self { grpc }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QlnContractTransport {
+    grpc: Arc<QlnGrpcClient>,
+    contract_id: QubicId,
+    input_type: u16,
+    wallet: QubicWallet,
+    balance_state: Arc<BalanceState>,
+}
+
+impl QlnContractTransport {
+    pub fn new(
+        grpc: Arc<QlnGrpcClient>,
+        wallet: QubicWallet,
+        contract_id: QubicId,
+        input_type: u16,
+        balance_state: Arc<BalanceState>,
+    ) -> Self {
+        Self {
+            grpc,
+            contract_id,
+            input_type,
+            wallet,
+            balance_state,
+        }
     }
 }
 
@@ -151,6 +198,27 @@ fn map_tick_transactions_response(
     }
 }
 
+fn map_broadcast_transaction_response(
+    response: lightnodepb::BroadcastTransactionResponse,
+) -> Result<String, String> {
+    if !response.ok {
+        let error = response.error.trim();
+        let message = if error.is_empty() {
+            "QLN BroadcastTransaction not ok: unknown error".to_string()
+        } else {
+            format!("QLN BroadcastTransaction not ok: error={error}")
+        };
+        return Err(message);
+    }
+
+    let tx_id = response.tx_id.trim();
+    if tx_id.is_empty() {
+        return Err("QLN BroadcastTransaction returned empty tx_id".to_string());
+    }
+
+    Ok(tx_id.to_string())
+}
+
 #[async_trait]
 impl ScapiClient for QlnScapiClient {
     async fn get_tick_info(&self) -> Result<TickInfo, TransportError> {
@@ -180,10 +248,59 @@ impl TickDataFetcher for QlnTickDataFetcher {
     }
 }
 
+#[async_trait]
+impl ScTransport for QlnContractTransport {
+    async fn send_reveal_and_commit(
+        &self,
+        input: RevealAndCommitInput,
+        amount: u64,
+        tick: u32,
+        pipeline_id: usize,
+    ) -> Result<String, TransportError> {
+        ensure_amount_available(&self.balance_state, amount)?;
+
+        console::log_info(format!(
+            "qln tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
+            input_type = self.input_type,
+        ));
+        let tx_bytes = build_reveal_and_commit_tx_bytes(
+            &self.wallet,
+            self.contract_id,
+            amount,
+            tick,
+            self.input_type,
+            &input,
+        )?;
+        let response = self
+            .grpc
+            .broadcast_transaction(tx_bytes)
+            .await
+            .map_err(|message| {
+                console::log_warn(format!(
+                    "qln tx[{pipeline_id}]: broadcast failed: {message}"
+                ));
+                TransportError { message }
+            })?;
+        let tx_id = map_broadcast_transaction_response(response).map_err(|message| {
+            console::log_warn(format!(
+                "qln tx[{pipeline_id}]: broadcast rejected: {message}"
+            ));
+            TransportError { message }
+        })?;
+
+        console::log_info(format!(
+            "qln tx[{pipeline_id}]: broadcast ok tx_id={tx_id}",
+            tx_id = console::shorten_id(&tx_id)
+        ));
+        Ok(tx_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        lightnodepb, map_balance_response, map_status_response, map_tick_transactions_response,
+        lightnodepb, map_balance_response, map_broadcast_transaction_response, map_status_response,
+        map_tick_transactions_response,
     };
 
     #[test]
@@ -263,6 +380,40 @@ mod tests {
         assert_eq!(
             map_tick_transactions_response(non_empty).expect("non empty"),
             Some(())
+        );
+    }
+
+    #[test]
+    fn map_broadcast_transaction_response_maps_success_and_errors() {
+        let ok = lightnodepb::BroadcastTransactionResponse {
+            ok: true,
+            tx_id: "abc123".to_string(),
+            error: String::new(),
+        };
+        let not_ok = lightnodepb::BroadcastTransactionResponse {
+            ok: false,
+            tx_id: String::new(),
+            error: "failed".to_string(),
+        };
+        let missing_tx = lightnodepb::BroadcastTransactionResponse {
+            ok: true,
+            tx_id: "  ".to_string(),
+            error: String::new(),
+        };
+
+        assert_eq!(
+            map_broadcast_transaction_response(ok).expect("ok response"),
+            "abc123"
+        );
+        assert!(
+            map_broadcast_transaction_response(not_ok)
+                .expect_err("not ok")
+                .contains("failed")
+        );
+        assert!(
+            map_broadcast_transaction_response(missing_tx)
+                .expect_err("missing tx")
+                .contains("empty tx_id")
         );
     }
 }

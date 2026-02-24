@@ -48,6 +48,13 @@ Update rule:
      - `docs/Random.h`
      - `docs/ClientUsage.md`
 
+6. `[x]` For `qln-grpc`, use QLN broadcast transport for SC sends (no RPC fallback in this backend).
+   - Done: `Backend::QlnGrpc` now uses `QlnContractTransport` over `BroadcastTransaction`.
+   - References:
+     - `src/app.rs`
+     - `src/qln/mod.rs`
+     - `proto/lightnode.proto`
+
 ## Change log (this repository)
 
 1. `[x]` Added this checklist file with mandatory status tracking rules.
@@ -55,3 +62,4 @@ Update rule:
 3. `[x]` Updated pipeline reveal-only behavior to match SC NB comment (stop window + shutdown).
 4. `[x]` Added CLI validation for collateral tiers and reveal-delay stream compatibility.
 5. `[x]` Synchronized local SC docs and client usage docs with current `Random.h`.
+6. `[x]` Switched `qln-grpc` send path from SCAPI RPC to QLN `BroadcastTransaction`.

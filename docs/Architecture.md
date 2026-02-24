@@ -77,7 +77,7 @@
 - For `qln-grpc`, the client uses QubicLightNode gRPC for:
   - tick polling (`GetStatus`),
   - balance watcher (`GetBalance`),
-  - empty-tick checks (`GetTickTransactions`).
-- Current LightNode proto does not expose transaction broadcast, so send path remains SCAPI RPC (`--rpc`) in this mode.
+  - empty-tick checks (`GetTickTransactions`),
+  - SC send path (`BroadcastTransaction`).
 - `--grpc` can include endpoint URL right after the flag; if omitted, default is `http://127.0.0.1:50051`.
 

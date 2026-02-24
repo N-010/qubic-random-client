@@ -231,6 +231,36 @@ fn build_tx_bytes(
     })
 }
 
+pub(crate) fn ensure_amount_available(
+    balance_state: &BalanceState,
+    amount: u64,
+) -> Result<(), TransportError> {
+    if amount == 0 {
+        return Ok(());
+    }
+
+    let balance = balance_state.amount();
+    if balance < amount {
+        return Err(TransportError {
+            message: format!("insufficient balance: have {balance} need {amount}"),
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn build_reveal_and_commit_tx_bytes(
+    wallet: &QubicWallet,
+    contract_id: QubicId,
+    amount: u64,
+    tick: u32,
+    input_type: u16,
+    input: &RevealAndCommitInput,
+) -> Result<Vec<u8>, TransportError> {
+    let payload = build_payload(input);
+    build_tx_bytes(wallet, contract_id, amount, tick, input_type, payload)
+}
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -313,29 +343,20 @@ impl ScTransport for ScapiContractTransport {
         tick: u32,
         pipeline_id: usize,
     ) -> Result<String, TransportError> {
-        if amount > 0 {
-            let balance = self.balance_state.amount();
-            if balance < amount {
-                return Err(TransportError {
-                    message: format!("insufficient balance: have {} need {}", balance, amount),
-                });
-            }
-        }
-
-        let payload = build_payload(&input);
+        ensure_amount_available(&self.balance_state, amount)?;
 
         console::log_info(format!(
             "scapi tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
             input_type = self.input_type,
         ));
 
-        let tx_bytes = build_tx_bytes(
+        let tx_bytes = build_reveal_and_commit_tx_bytes(
             &self.wallet,
             self.contract_id,
             amount,
             tick,
             self.input_type,
-            payload,
+            &input,
         )?;
 
         let encoded = BASE64_STANDARD.encode(tx_bytes);
@@ -366,29 +387,20 @@ impl ScTransport for BobContractTransport {
         tick: u32,
         pipeline_id: usize,
     ) -> Result<String, TransportError> {
-        if amount > 0 {
-            let balance = self.balance_state.amount();
-            if balance < amount {
-                return Err(TransportError {
-                    message: format!("insufficient balance: have {balance} need {amount}"),
-                });
-            }
-        }
-
-        let payload = build_payload(&input);
+        ensure_amount_available(&self.balance_state, amount)?;
 
         console::log_info(format!(
             "bob tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
             input_type = self.input_type,
         ));
 
-        let tx_bytes = build_tx_bytes(
+        let tx_bytes = build_reveal_and_commit_tx_bytes(
             &self.wallet,
             self.contract_id,
             amount,
             tick,
             self.input_type,
-            payload,
+            &input,
         )?;
 
         let encoded = bytes_to_hex(&tx_bytes);
