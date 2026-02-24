@@ -63,6 +63,7 @@
 - Config: `reveal_window_ticks` defines the window size (e.g. 10 ticks). When `now_tick >= reveal_send_at_tick - guard`, the pipeline sends reveal+commit.
 - The reveal/commit interval remains `reveal_delay_ticks` (default 3); only the allowable send time is widened.
 - Requirement: pick `reveal_window_ticks` >= max expected tick polling gap to ensure at least one tick lands in the window.
+- If reveal send fails due to external transport errors, the client does not enqueue a retry for that reveal by design.
 
 ## Bob JSON-RPC (ASCII)
 - When `--bob` is set, the client uses Bob JSON-RPC for tick polling, balance, empty-tick checks, and transaction broadcast.

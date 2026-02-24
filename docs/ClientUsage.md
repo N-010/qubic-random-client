@@ -63,6 +63,7 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 - Resume condition is `current_tick - initial_tick >= --epoch-resume-delay-ticks` and not being in the stop window.
 - After resume condition is met, pipeline continues with normal start (`empty reveal + commit`), then normal reveal+commit cycle.
 - `empty tick` checks and balance polling continue regardless of reveal/commit send pause.
+- If reveal broadcast fails due to an external service (RPC/Bob/network), the client does not retry that reveal; this is intentional.
 
 ## RPC usage
 
