@@ -41,16 +41,16 @@ If `--seed` is not provided, the seed is read from stdin/TTY.
 ```text
 --seed <seed>                      Seed (55 chars, a-z)
 --max-inflight-sends <n>                      Number of senders (default: 3)
---reveal-delay-ticks <n>           Reveal delay in ticks (default: 3)
---reveal-window-ticks <n>      Guard ticks before reveal send (default: 5)
---commit-amount <n>                Commit amount (default: 10000)
+--reveal-delay-ticks <n>           Reveal delay in ticks (positive multiple of 3, default: 3)
+--reveal-window-ticks <n>      Guard ticks before reveal send (default: 6)
+--commit-amount <n>                Commit amount (must be 1/10/.../1_000_000_000, default: 10000)
 --pipeline-count <n> Pipeline size (default: 3)
 --worker-threads <n>              Runtime threads (0 = auto)
---tick-poll <ms>       Tick polling interval 
+--tick-poll <ms>       Tick polling interval (default: 1000)
 --rpc [url]                        Use RPC endpoint (optional endpoint after flag)
 --bob [url]                        Use Bob JSON-RPC (optional endpoint after flag)
 --grpc [url]                       Use QubicLightNode gRPC (optional endpoint after flag)
---balance-interval-ms <ms>         Balance print interval 
+--balance-interval-ms <ms>         Balance print interval (default: 600)
 ```
 
 ## Parameter details
@@ -67,6 +67,7 @@ sending.
 Base delay (in ticks) between a commit and its reveal. Larger values spread out
 reveal traffic and reduce overlap but increase the time until a reveal is sent.
 Smaller values make the cycle faster but can be less tolerant to network delays.
+Value must be a positive multiple of 3 to keep SC stream alignment.
 
 ### --reveal-window-ticks
 Guard window (in ticks) before the scheduled reveal tick. The pipeline waits
@@ -75,8 +76,8 @@ Larger values send reveals earlier; smaller values wait closer to the reveal
 tick.
 
 ### --commit-amount
-Amount sent with each commit/reveal transaction. If zero, balance checks are
-skipped and the pipeline still emits jobs. Larger values require more balance
+Amount sent with each commit/reveal transaction. Must be one of SC collateral
+tiers: `1, 10, 100, ..., 1_000_000_000`. Larger values require more balance
 and can cause the pipeline to pause when funds are insufficient.
 
 ### --pipeline-count
@@ -113,6 +114,8 @@ logging.
 
 ## Important details
 - Each transaction contains the reveal for the previous commit plus a new commit.
+- In stop window and on shutdown, reveal-only is sent with `commit=0` and the
+  same collateral amount as the pending commit.
 - The seed is kept in locked memory and zeroized on shutdown.
 - On shutdown, a pending reveal is sent synchronously.
 

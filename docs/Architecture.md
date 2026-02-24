@@ -30,11 +30,11 @@
 ### Ключевые типы/трейты
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
-- `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `endpoint`, `balance_interval_ms`.
+- `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `reveal_window_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `endpoint`, `balance_interval_ms`.
 - `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
-- `PendingItem`: `{ commit_tick, revealed_bits, committed_digest, amount }`.
+- `PendingItem`: `{ reveal_send_at_tick, revealed_bits, collateral_amount }`.
 
 ### Tick/Balance через SCAPI v0.2
 Методы SCAPI v2:
@@ -49,12 +49,12 @@
 - Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
 - CLI: seed via stdin/TTY by default; --seed overrides; --rpc used for RPC; SC interaction via SCAPI RequestDataBuilder.
-- commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.
+- commit digest = K12(reveal bits), reveal bits generated via OS CSPRNG.
 
 ## Shutdown behavior (ASCII)
 - On shutdown, if there is a pending commit waiting to be revealed, the pipeline returns a self-reveal job to the main task.
 - The main task sends this reveal synchronously before exit (not via background max_inflight_sends) to avoid Ctrl-C races.
-- This shutdown reveal uses amount=0 and sets committed_digest = K12(revealed_bits), so it does not create a new paid commit.
+- This shutdown reveal uses reveal-only semantics for SC Random: `commit = 0` and amount equals pending collateral tier.
 - The shutdown reveal tick is max(pending.reveal_send_at_tick, current_tick + reveal_delay_ticks) to avoid using an outdated tick.
 
 ## Tick window for slow RPC polling (ASCII)

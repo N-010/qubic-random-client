@@ -140,6 +140,8 @@ impl AppConfig {
 
     fn from_cli_inner(cli: Cli, seed_value: String) -> Result<Self, String> {
         let seed = Seed::new(seed_value)?;
+        validate_commit_amount(cli.commit_amount)?;
+        validate_reveal_delay_ticks(cli.reveal_delay_ticks)?;
         let max_inflight_sends = if cli.max_inflight_sends == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -219,6 +221,36 @@ fn validate_seed(seed: &str) -> Result<(), String> {
         return Err("seed must contain only a-z characters".to_string());
     }
     Ok(())
+}
+
+fn validate_commit_amount(amount: u64) -> Result<(), String> {
+    if matches!(
+        amount,
+        1 | 10
+            | 100
+            | 1_000
+            | 10_000
+            | 100_000
+            | 1_000_000
+            | 10_000_000
+            | 100_000_000
+            | 1_000_000_000
+    ) {
+        return Ok(());
+    }
+
+    Err(
+        "commit_amount must be one of: 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000"
+            .to_string(),
+    )
+}
+
+fn validate_reveal_delay_ticks(reveal_delay_ticks: u32) -> Result<(), String> {
+    if reveal_delay_ticks > 0 && reveal_delay_ticks % 3 == 0 {
+        return Ok(());
+    }
+
+    Err("reveal_delay_ticks must be a positive multiple of 3".to_string())
 }
 
 fn resolve_seed<F>(seed: Option<String>, read_seed: F) -> Result<String, String>
@@ -344,7 +376,8 @@ fn unlock_bytes(_bytes: &[u8]) {}
 mod tests {
     use super::{
         AppConfig, Backend, Cli, DEFAULT_BOB_ENDPOINT, DEFAULT_RPC_ENDPOINT, Seed,
-        normalize_rpc_endpoint, read_seed_from_reader, resolve_seed, validate_seed,
+        normalize_rpc_endpoint, read_seed_from_reader, resolve_seed, validate_commit_amount,
+        validate_reveal_delay_ticks, validate_seed,
     };
     use std::io::Cursor;
 
@@ -436,6 +469,44 @@ mod tests {
     }
 
     #[test]
+    fn validate_commit_amount_accepts_sc_collateral_tiers() {
+        for amount in [
+            1_u64,
+            10,
+            100,
+            1_000,
+            10_000,
+            100_000,
+            1_000_000,
+            10_000_000,
+            100_000_000,
+            1_000_000_000,
+        ] {
+            assert!(validate_commit_amount(amount).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_commit_amount_rejects_non_tier_value() {
+        let err = validate_commit_amount(42).expect_err("expected error");
+        assert!(err.contains("commit_amount must be one of"));
+    }
+
+    #[test]
+    fn validate_reveal_delay_ticks_accepts_positive_multiples_of_three() {
+        assert!(validate_reveal_delay_ticks(3).is_ok());
+        assert!(validate_reveal_delay_ticks(6).is_ok());
+    }
+
+    #[test]
+    fn validate_reveal_delay_ticks_rejects_invalid_values() {
+        let err = validate_reveal_delay_ticks(0).expect_err("expected error");
+        assert_eq!(err, "reveal_delay_ticks must be a positive multiple of 3");
+        let err = validate_reveal_delay_ticks(4).expect_err("expected error");
+        assert_eq!(err, "reveal_delay_ticks must be a positive multiple of 3");
+    }
+
+    #[test]
     fn from_cli_inner_auto_threads_and_max_inflight_sends() {
         // Zero values are replaced by available_parallelism.
         let cli = Cli {
@@ -523,7 +594,7 @@ mod tests {
             tick_poll: 10,
             rpc: Some("127.0.0.1:21841".to_string()),
             balance_interval_ms: 10,
-            empty_tick_check_interval_ms: 10,
+            reveal_checks: 10,
             reveal_check_delay_ticks: 10,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 50,
@@ -540,6 +611,54 @@ mod tests {
         assert_eq!(endpoint, "https://rpc.qubic.org");
         let endpoint = normalize_rpc_endpoint("https://rpc.qubic.org/query/v1".to_string());
         assert_eq!(endpoint, "https://rpc.qubic.org");
+    }
+
+    #[test]
+    fn from_cli_inner_rejects_invalid_commit_amount() {
+        let cli = Cli {
+            seed: None,
+            max_inflight_sends: 1,
+            reveal_delay_ticks: 3,
+            reveal_window_ticks: 2,
+            commit_amount: 42,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
+            balance_interval_ms: 10,
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: None,
+        };
+        let err = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect_err("expected err");
+        assert!(err.contains("commit_amount must be one of"));
+    }
+
+    #[test]
+    fn from_cli_inner_rejects_reveal_delay_not_multiple_of_three() {
+        let cli = Cli {
+            seed: None,
+            max_inflight_sends: 1,
+            reveal_delay_ticks: 4,
+            reveal_window_ticks: 2,
+            commit_amount: 10,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("endpoint".to_string()),
+            balance_interval_ms: 10,
+            reveal_checks: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: None,
+        };
+        let err = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect_err("expected err");
+        assert_eq!(err, "reveal_delay_ticks must be a positive multiple of 3");
     }
 
     #[test]
