@@ -38,7 +38,6 @@ No Git history exists yet, so there is no established commit convention.
 ## Notes
 The crate uses Rust edition 2024 (see `Cargo.toml`). If you add dependencies, update `Cargo.toml` and commit the resulting `Cargo.lock`.
 For SC integration, use the `scapi` library from `https://github.com/N-010/scapi` and document any setup steps you add.
-- SC Random compatibility checklist (required status tracking): `docs/SC_Random_Alignment_Checklist.md`.
 - For every SC-related change, update checklist statuses in that file:
   - mark completed work as done,
   - mark partial work as partial with a short note describing completed scope.
