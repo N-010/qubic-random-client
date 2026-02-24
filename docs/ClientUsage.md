@@ -45,7 +45,7 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 --reveal-check-delay-ticks <N> Minimum tick delay before checking reveal tick data (default 10)
 --epoch-stop-lead-time-secs <N> Seconds before Wednesday 12:00 UTC when reveal/commit sending is stopped (default 600)
 --epoch-resume-delay-ticks <N> Minimum ticks from epoch initial tick before reveal/commit sending resumes (default 50)
---rpc [URL]                    Use RPC endpoint (default https://rpc.qubic.org/live/v1/)
+--rpc [URL]                    Use RPC endpoint (default https://rpc.qubic.org)
 --balance-interval-ms <N>      Balance print interval (default 300)
 ```
 
@@ -88,7 +88,7 @@ Run with a custom RPC endpoint and deposit:
 ```bash
 cargo run -- \
   --seed <seed> \
-  --rpc https://rpc.qubic.org/live/v1/ \
+  --rpc https://rpc.qubic.org \
   --commit-amount 25000
 ```
 

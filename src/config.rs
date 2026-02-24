@@ -17,7 +17,7 @@ const DEFAULT_TICK_DATA_CHECK_INTERVAL_MS: u64 = 600;
 const DEFAULT_TICK_DATA_MIN_DELAY_TICKS: u32 = 10;
 const DEFAULT_EPOCH_STOP_LEAD_TIME_SECS: u64 = 600;
 const DEFAULT_EPOCH_RESUME_DELAY_TICKS: u32 = 50;
-const DEFAULT_RPC_ENDPOINT: &str = "https://rpc.qubic.org/live/v1/";
+const DEFAULT_RPC_ENDPOINT: &str = "https://rpc.qubic.org";
 const DEFAULT_BOB_ENDPOINT: &str = scapi::bob::DEFAULT_BOB_RPC_ENDPOINT;
 const DEFAULT_GRPC_ENDPOINT: &str = "http://127.0.0.1:50051";
 
@@ -165,7 +165,8 @@ impl AppConfig {
         } else {
             Backend::Rpc
         };
-        let rpc_endpoint = cli.rpc.unwrap_or_else(|| DEFAULT_RPC_ENDPOINT.to_string());
+        let rpc_endpoint =
+            normalize_rpc_endpoint(cli.rpc.unwrap_or_else(|| DEFAULT_RPC_ENDPOINT.to_string()));
         let bob_endpoint = cli.bob.unwrap_or_else(|| DEFAULT_BOB_ENDPOINT.to_string());
         let grpc_endpoint = cli
             .grpc
@@ -192,6 +193,21 @@ impl AppConfig {
                 grpc_endpoint,
             },
         })
+    }
+}
+
+fn normalize_rpc_endpoint(endpoint: String) -> String {
+    let mut endpoint = endpoint.trim().trim_end_matches('/').to_string();
+    if let Some(stripped) = endpoint.strip_suffix("/live/v1") {
+        endpoint = stripped.trim_end_matches('/').to_string();
+    }
+    if let Some(stripped) = endpoint.strip_suffix("/query/v1") {
+        endpoint = stripped.trim_end_matches('/').to_string();
+    }
+    if endpoint.contains("://") {
+        endpoint
+    } else {
+        format!("http://{endpoint}")
     }
 }
 
@@ -328,7 +344,7 @@ fn unlock_bytes(_bytes: &[u8]) {}
 mod tests {
     use super::{
         AppConfig, Backend, Cli, DEFAULT_BOB_ENDPOINT, DEFAULT_RPC_ENDPOINT, Seed,
-        read_seed_from_reader, resolve_seed, validate_seed,
+        normalize_rpc_endpoint, read_seed_from_reader, resolve_seed, validate_seed,
     };
     use std::io::Cursor;
 
@@ -492,6 +508,38 @@ mod tests {
         };
         let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
         assert_eq!(config.runtime.endpoint, DEFAULT_RPC_ENDPOINT);
+    }
+
+    #[test]
+    fn from_cli_inner_normalizes_rpc_ip_port() {
+        let cli = Cli {
+            seed: None,
+            max_inflight_sends: 1,
+            reveal_delay_ticks: 3,
+            reveal_window_ticks: 2,
+            commit_amount: 10,
+            pipeline_count: 1,
+            worker_threads: 1,
+            tick_poll: 10,
+            rpc: Some("127.0.0.1:21841".to_string()),
+            balance_interval_ms: 10,
+            empty_tick_check_interval_ms: 10,
+            reveal_check_delay_ticks: 10,
+            epoch_stop_lead_time_secs: 600,
+            epoch_resume_delay_ticks: 50,
+            bob: None,
+            grpc: None,
+        };
+        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
+        assert_eq!(config.runtime.endpoint, "http://127.0.0.1:21841");
+    }
+
+    #[test]
+    fn normalize_rpc_endpoint_strips_known_suffixes() {
+        let endpoint = normalize_rpc_endpoint("https://rpc.qubic.org/live/v1/".to_string());
+        assert_eq!(endpoint, "https://rpc.qubic.org");
+        let endpoint = normalize_rpc_endpoint("https://rpc.qubic.org/query/v1".to_string());
+        assert_eq!(endpoint, "https://rpc.qubic.org");
     }
 
     #[test]

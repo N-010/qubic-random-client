@@ -17,7 +17,7 @@ architecture is in `docs/Architecture.md`, and the input structure is in
 
 ## Requirements
 - Rust (edition 2024).
-- Access to an RPC endpoint (default: `https://rpc.qubic.org/live/v1/`).
+- Access to an RPC endpoint (default: `https://rpc.qubic.org`).
 - Optional Bob endpoint for JSON-RPC (default: `http://localhost:40420/qubic`).
 - Optional QubicLightNode gRPC endpoint (default: `http://127.0.0.1:50051`).
 
@@ -94,7 +94,8 @@ reduce latency but increase load on the endpoint.
 ### --rpc
 Use RPC endpoint for transaction broadcast and RPC-based reads.
 If URL is provided right after the flag, that URL is used.
-If URL is omitted, default is `https://rpc.qubic.org/live/v1/`.
+Pass only the base endpoint (`ip:port` or `scheme://host:port`), without `/live/v1` or `/query/v1`.
+If URL is omitted, default is `https://rpc.qubic.org`.
 
 ### --bob
 Use Bob JSON-RPC for tick, balance, empty-tick checks, and transaction broadcast.

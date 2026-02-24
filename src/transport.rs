@@ -56,7 +56,7 @@ pub struct ScapiRpcClient {
 
 impl ScapiRpcClient {
     pub fn new(base_url: String) -> Self {
-        let rpc = RpcClient::with_base_url(Cow::Owned(base_url));
+        let rpc = RpcClient::with_base_url(Cow::Owned(scapi_live_url(&base_url)));
         Self { rpc }
     }
 }
@@ -167,7 +167,7 @@ impl ScapiContractTransport {
         input_type: u16,
         balance_state: Arc<BalanceState>,
     ) -> Self {
-        let rpc = RpcClient::with_base_url(Cow::Owned(base_url));
+        let rpc = RpcClient::with_base_url(Cow::Owned(scapi_live_url(&base_url)));
         Self {
             rpc,
             contract_id,
@@ -176,6 +176,10 @@ impl ScapiContractTransport {
             balance_state,
         }
     }
+}
+
+fn scapi_live_url(base_url: &str) -> String {
+    format!("{}/live/v1", base_url.trim_end_matches('/'))
 }
 
 #[derive(Debug, Clone)]
