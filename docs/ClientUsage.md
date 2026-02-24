@@ -89,7 +89,7 @@ Run with a custom RPC endpoint and deposit:
 cargo run -- \
   --seed <seed> \
   --rpc https://rpc.qubic.org \
-  --commit-amount 25000
+  --commit-amount 100000
 ```
 
 Run with auto senders:

@@ -31,7 +31,7 @@
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
 - `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `reveal_window_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `endpoint`, `balance_interval_ms`.
-- `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
+- `TickInfo`: `{ epoch: u32, tick: u32, initial_tick: u32 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
 - `PendingItem`: `{ reveal_send_at_tick, revealed_bits, collateral_amount }`.
@@ -44,7 +44,7 @@
 
 
 ## Notes (ASCII)
-- TickInfo uses u32 for epoch/tick/tick_duration_ms in this client.
+- TickInfo uses u32 for epoch/tick/initial_tick in this client.
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
 - Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
