@@ -17,7 +17,7 @@ architecture is in `docs/Architecture.md`, and the input structure is in
 
 ## Requirements
 - Rust (edition 2024).
-- Access to an RPC endpoint (default: `https://rpc.qubic.org/live/v1/`).
+- Access to an RPC endpoint (default: `https://rpc.qubic.org`).
 - Optional Bob endpoint for JSON-RPC (default: `http://localhost:40420/qubic`).
 - Optional QubicLightNode gRPC endpoint (default: `http://127.0.0.1:50051`).
 
@@ -40,12 +40,12 @@ If `--seed` is not provided, the seed is read from stdin/TTY.
 ## CLI options
 ```text
 --seed <seed>                      Seed (55 chars, a-z)
---max-inflight-sends <n>           Number of concurrent senders (default: 3; 0 = auto)
+--max-inflight-sends <n>           Number of senders (default: 3; 0 = auto)
 --reveal-delay-ticks <n>           Reveal delay in ticks (default: 3)
 --reveal-window-ticks <n>          Guard ticks before reveal send (default: 6)
---commit-amount <n>                Commit amount (default: 10000)
+--commit-amount <n>                Commit amount (must be 1/10/.../1_000_000_000, default: 10000)
 --pipeline-count <n>               Pipeline size (default: 3)
---worker-threads <n>               Runtime threads (default: 0 = auto)
+--worker-threads <n>               Runtime threads (0 = auto)
 --tick-poll <ms>                   Tick polling interval (default: 1000)
 --balance-interval-ms <ms>         Balance print interval (default: 600)
 --empty-tick-check-interval-ms <ms> Reveal empty-tick check interval (default: 600)
@@ -71,6 +71,7 @@ sending. If set to 0, the value is replaced with available CPU parallelism.
 Base delay (in ticks) between a commit and its reveal. Larger values spread out
 reveal traffic and reduce overlap but increase the time until a reveal is sent.
 Smaller values make the cycle faster but can be less tolerant to network delays.
+Value must be a positive multiple of 3 to keep SC stream alignment.
 
 ### --reveal-window-ticks
 Guard window (in ticks) before the scheduled reveal tick. The pipeline waits
@@ -79,8 +80,8 @@ Larger values send reveals earlier; smaller values wait closer to the reveal
 tick.
 
 ### --commit-amount
-Amount sent with each commit/reveal transaction. If zero, balance checks are
-skipped and the pipeline still emits jobs. Larger values require more balance
+Amount sent with each commit/reveal transaction. Must be one of SC collateral
+tiers: `1, 10, 100, ..., 1_000_000_000`. Larger values require more balance
 and can cause the pipeline to pause when funds are insufficient.
 
 ### --pipeline-count
@@ -98,7 +99,8 @@ reduce latency but increase load on the endpoint.
 ### --rpc
 Use RPC endpoint for transaction broadcast and RPC-based reads.
 If URL is provided right after the flag, that URL is used.
-If URL is omitted, default is `https://rpc.qubic.org/live/v1/`.
+Pass only the base endpoint (`ip:port` or `scheme://host:port`), without `/live/v1` or `/query/v1`.
+If URL is omitted, default is `https://rpc.qubic.org`.
 
 ### --bob
 Use Bob JSON-RPC for tick, balance, empty-tick checks, and transaction broadcast.
@@ -133,6 +135,8 @@ How many ticks the client waits after epoch switch before resuming pipeline work
 - Each transaction contains the reveal for the previous commit plus a new commit.
 - `--bob` and `--grpc` are mutually exclusive; using both returns an error.
 - Backend selection priority: `--bob` -> `--grpc` -> default `RPC`.
+- In stop window and on shutdown, reveal-only is sent with `commit=0` and the
+  same collateral amount as the pending commit.
 - The seed is kept in locked memory and zeroized on shutdown.
 - On shutdown, a pending reveal is sent synchronously.
 

@@ -12,7 +12,7 @@ use crate::balance::{BalanceState, run_balance_watcher};
 use crate::config::{AppConfig, Backend};
 use crate::console;
 use crate::pipeline::{Pipeline, PipelineEvent, run_job_dispatcher};
-use crate::qln::{QlnGrpcClient, QlnScapiClient, QlnTickDataFetcher};
+use crate::qln::{QlnContractTransport, QlnGrpcClient, QlnScapiClient, QlnTickDataFetcher};
 use crate::tick_data_watcher::{BobTickDataFetcher, TickDataFetcher, TickDataWatcher};
 use crate::ticks::ScapiTickSource;
 use crate::transport::{
@@ -68,8 +68,8 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
             })?);
             (
                 Arc::new(QlnScapiClient::new(qln.clone())),
-                Arc::new(ScapiContractTransport::new(
-                    runtime.endpoint.clone(),
+                Arc::new(QlnContractTransport::new(
+                    qln.clone(),
                     scapi_wallet,
                     contract_id,
                     1,

@@ -30,11 +30,11 @@
 ### Ключевые типы/трейты
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
-- `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `endpoint`, `balance_interval_ms`.
-- `TickInfo`: `{ epoch: u16, tick: u32, tick_duration_ms: u16 }`.
+- `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `reveal_window_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `endpoint`, `balance_interval_ms`.
+- `TickInfo`: `{ epoch: u32, tick: u32, initial_tick: u32 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
-- `PendingItem`: `{ commit_tick, revealed_bits, committed_digest, amount }`.
+- `PendingItem`: `{ reveal_send_at_tick, revealed_bits, collateral_amount }`.
 
 ### Tick/Balance через SCAPI v0.2
 Методы SCAPI v2:
@@ -44,17 +44,17 @@
 
 
 ## Notes (ASCII)
-- TickInfo uses u32 for epoch/tick/tick_duration_ms in this client.
+- TickInfo uses u32 for epoch/tick/initial_tick in this client.
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
 - Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
 - CLI: seed via stdin/TTY by default; --seed overrides; --rpc used for RPC; SC interaction via SCAPI RequestDataBuilder.
-- commit digest = K12(revealedBits), revealedBits generated via OS CSPRNG.
+- commit digest = K12(reveal bits), reveal bits generated via OS CSPRNG.
 
 ## Shutdown behavior (ASCII)
 - On shutdown, if there is a pending commit waiting to be revealed, the pipeline returns a self-reveal job to the main task.
 - The main task sends this reveal synchronously before exit (not via background max_inflight_sends) to avoid Ctrl-C races.
-- This shutdown reveal uses amount=0 and sets committed_digest = K12(revealed_bits), so it does not create a new paid commit.
+- This shutdown reveal uses reveal-only semantics for SC Random: `commit = 0` and amount equals pending collateral tier.
 - The shutdown reveal tick is max(pending.reveal_send_at_tick, current_tick + reveal_delay_ticks) to avoid using an outdated tick.
 
 ## Tick window for slow RPC polling (ASCII)
@@ -63,6 +63,7 @@
 - Config: `reveal_window_ticks` defines the window size (e.g. 10 ticks). When `now_tick >= reveal_send_at_tick - guard`, the pipeline sends reveal+commit.
 - The reveal/commit interval remains `reveal_delay_ticks` (default 3); only the allowable send time is widened.
 - Requirement: pick `reveal_window_ticks` >= max expected tick polling gap to ensure at least one tick lands in the window.
+- If reveal send fails due to external transport errors, the client does not enqueue a retry for that reveal by design.
 
 ## Bob JSON-RPC (ASCII)
 - When `--bob` is set, the client uses Bob JSON-RPC for tick polling, balance, empty-tick checks, and transaction broadcast.
@@ -76,7 +77,7 @@
 - For `qln-grpc`, the client uses QubicLightNode gRPC for:
   - tick polling (`GetStatus`),
   - balance watcher (`GetBalance`),
-  - empty-tick checks (`GetTickTransactions`).
-- Current LightNode proto does not expose transaction broadcast, so send path remains SCAPI RPC (`--rpc`) in this mode.
+  - empty-tick checks (`GetTickTransactions`),
+  - SC send path (`BroadcastTransaction`).
 - `--grpc` can include endpoint URL right after the flag; if omitted, default is `http://127.0.0.1:50051`.
 
