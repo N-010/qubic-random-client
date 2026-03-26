@@ -51,7 +51,7 @@ impl ScapiTickSource {
                     }
                 }
                 Err(err) => {
-                    console::log_warn(format!("tick source error: {}", err));
+                    console::log_warn(format!("Could not read the current tick: {err}"));
                 }
             }
             sleep(self.poll_interval).await;

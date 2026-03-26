@@ -123,9 +123,8 @@ impl Pipeline {
             };
 
             console::log_info(format!(
-                "pipeline[{id}] shutdown reveal-only: now_tick={now_tick} reveal_tick={reveal_tick} amount={amount}",
-                id = self.id,
-                now_tick = self.tick_info.tick,
+                "Worker {worker} is sending the last pending reveal before shutdown for tick {reveal_tick} (amount {amount})",
+                worker = self.id + 1,
                 amount = pending.collateral_amount,
             ));
             reveal_job
@@ -156,8 +155,8 @@ impl Pipeline {
 
         if self.stop_window_handled_epoch != Some(tick_info.epoch) {
             console::log_info(format!(
-                "pipeline[{id}] entered stop window: epoch={epoch} tick={tick}",
-                id = self.id,
+                "Epoch {epoch} is close to ending, so worker {worker} paused new commits at tick {tick}",
+                worker = self.id + 1,
                 epoch = tick_info.epoch,
                 tick = tick_info.tick
             ));
@@ -185,8 +184,8 @@ impl Pipeline {
         }
 
         console::log_warn(format!(
-            "pipeline[{id}] paused: balance={balance} < amount={commit_amount}",
-            id = self.id,
+            "Worker {worker} is waiting for balance top-up ({balance} available, {commit_amount} needed)",
+            worker = self.id + 1,
             balance = balance,
             commit_amount = commit_amount
         ));
@@ -221,9 +220,9 @@ impl Pipeline {
         };
 
         console::log_info(format!(
-            "pipeline[{id}] commit-only: commit_tick={commit_tick} amount={amount}",
-            id = self.id,
-            commit_tick = scheduled_tick,
+            "Worker {worker} prepared a commit for tick {tick} (amount {amount})",
+            worker = self.id + 1,
+            tick = scheduled_tick,
             amount = self.config.commit_amount,
         ));
         if job_tx.send(commit_job).await.is_err() {
@@ -266,9 +265,9 @@ impl Pipeline {
             };
 
             console::log_info(format!(
-                "pipeline[{id}] reveal-only in stop window: reveal_tick={reveal_tick} amount={amount}",
-                id = self.id,
-                reveal_tick = reveal_send_at_tick,
+                "Worker {worker} is revealing the last commit for tick {tick} before epoch end (amount {amount})",
+                worker = self.id + 1,
+                tick = reveal_send_at_tick,
                 amount = pending.collateral_amount,
             ));
             if job_tx.send(reveal_job).await.is_err() {
@@ -290,8 +289,8 @@ impl Pipeline {
             #[cfg(test)]
             record_reschedule();
             console::log_warn(format!(
-                "pipeline[{id}] reschedule reveal: old_reveal_tick={old_reveal_tick} new_reveal_tick={new_reveal_tick}",
-                id = self.id,
+                "Worker {worker} missed the reveal window, rescheduled from tick {old_reveal_tick} to tick {new_reveal_tick}",
+                worker = self.id + 1,
                 old_reveal_tick = reveal_send_at_tick,
                 new_reveal_tick = rescheduled
             ));
@@ -304,10 +303,8 @@ impl Pipeline {
         let send_window_start = reveal_send_at_tick.saturating_sub(reveal_send_guard);
         if tick_info.tick < send_window_start {
             console::log_info(format!(
-                "pipeline[{id}] waiting: send_from_tick={send_from_tick} reveal_send_at_tick={reveal_send_at_tick}",
-                id = self.id,
-                send_from_tick = send_window_start,
-                reveal_send_at_tick = reveal_send_at_tick,
+                "Worker {worker} is waiting for the reveal window (from tick {send_window_start}, target tick {reveal_send_at_tick})",
+                worker = self.id + 1,
             ));
             return true;
         }
@@ -330,8 +327,9 @@ impl Pipeline {
         };
 
         console::log_info(format!(
-            "pipeline[{id}] reveal+commit: next_reveal_tick={next_reveal_tick} amount={amount}",
-            id = self.id,
+            "Worker {worker} sent reveal for tick {reveal_tick} and prepared the next round for tick {next_reveal_tick} (amount {amount})",
+            worker = self.id + 1,
+            reveal_tick = reveal_tick,
             amount = self.config.commit_amount,
         ));
         if job_tx.send(reveal_job).await.is_err() {
@@ -376,7 +374,9 @@ impl Pipeline {
             let warmup_elapsed = current_tick.saturating_sub(initial_tick);
             let warmup_remaining = warmup_required.saturating_sub(warmup_elapsed);
             console::log_info(format!(
-                "pipeline[{id}] warmup: elapsed={warmup_elapsed}/{warmup_required} remaining={warmup_remaining} current_tick={current_tick} initial_tick={initial_tick}"
+                "Worker {} will start in {} tick(s) after the epoch switch",
+                id + 1,
+                warmup_remaining
             ));
             self.tick_info = tick_info;
             return true;
@@ -463,16 +463,16 @@ pub async fn run_job_dispatcher(
             let is_reveal = job.kind == RevealCommitKind::Reveal;
             let late_tick =
                 current_tick_load(&current_tick).is_some_and(|current| current > job.tick);
-            if late_tick {
-                if is_reveal {
-                    console::record_reveal_result(false);
+                if late_tick {
+                    if is_reveal {
+                        console::record_reveal_result(false);
+                    }
+                    console::log_warn(format!(
+                        "Skipped a scheduled transaction for tick {} because that tick has already passed",
+                        job.tick
+                    ));
+                    return;
                 }
-                console::log_warn(format!(
-                    "skip RevealAndCommit: current_tick > job_tick (job_tick={})",
-                    job.tick
-                ));
-                return;
-            }
 
             let result = transport
                 .send_reveal_and_commit(job.input, job.amount, job.tick, job.pipeline_id)
@@ -489,7 +489,7 @@ pub async fn run_job_dispatcher(
                     if is_reveal && is_broadcast_error(&err) {
                         console::record_reveal_result(false);
                     }
-                    console::log_warn(format!("send RevealAndCommit failed: {err}"));
+                    console::log_warn(format!("Could not send the scheduled transaction: {err}"));
                 }
             }
         });
@@ -497,7 +497,7 @@ pub async fn run_job_dispatcher(
 
     while let Some(result) = tasks.join_next().await {
         if let Err(err) = result {
-            console::log_warn(format!("job sender task failed: {err}"));
+            console::log_warn(format!("A background send task crashed: {err}"));
         }
     }
 }

@@ -346,8 +346,8 @@ impl ScTransport for ScapiContractTransport {
         ensure_amount_available(&self.balance_state, amount)?;
 
         console::log_info(format!(
-            "scapi tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
-            input_type = self.input_type,
+            "Sending transaction for tick {tick} through RPC (worker {}, amount {amount})",
+            pipeline_id + 1,
         ));
 
         let tx_bytes = build_reveal_and_commit_tx_bytes(
@@ -364,15 +364,17 @@ impl ScTransport for ScapiContractTransport {
             .await
             .map_err(|err| {
                 console::log_warn(format!(
-                    "scapi tx[{pipeline_id}]: broadcast failed: {}",
-                    err
+                    "RPC rejected the transaction for tick {tick}: {err}"
                 ));
                 TransportError {
                     message: format!("broadcast transaction failed: {}", err),
                 }
             })?;
 
-        console::log_info(format!("scapi tx[{pipeline_id}]: broadcast ok"));
+        console::log_info(format!(
+            "Transaction for tick {tick} was accepted by RPC (worker {})",
+            pipeline_id + 1,
+        ));
 
         Ok(response.transaction_id)
     }
@@ -390,8 +392,8 @@ impl ScTransport for BobContractTransport {
         ensure_amount_available(&self.balance_state, amount)?;
 
         console::log_info(format!(
-            "bob tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
-            input_type = self.input_type,
+            "Sending transaction for tick {tick} through Bob (worker {}, amount {amount})",
+            pipeline_id + 1,
         ));
 
         let tx_bytes = build_reveal_and_commit_tx_bytes(
@@ -409,7 +411,9 @@ impl ScTransport for BobContractTransport {
             .qubic_broadcast_transaction(encoded)
             .await
             .map_err(|err| {
-                console::log_warn(format!("bob tx[{pipeline_id}]: broadcast failed: {err}"));
+                console::log_warn(format!(
+                    "Bob rejected the transaction for tick {tick}: {err}"
+                ));
                 TransportError {
                     message: format!("broadcast transaction failed: {err}"),
                 }
@@ -420,8 +424,9 @@ impl ScTransport for BobContractTransport {
         })?;
 
         console::log_info(format!(
-            "bob tx[{pipeline_id}]: broadcast ok tx_id={tx}",
-            tx = console::shorten_id(&tx)
+            "Transaction for tick {tick} was accepted by Bob (worker {}, tx {})",
+            pipeline_id + 1,
+            console::shorten_id(&tx)
         ));
 
         Ok(tx)

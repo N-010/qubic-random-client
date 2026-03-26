@@ -42,13 +42,19 @@ impl Backend {
 #[derive(Debug, Parser)]
 #[command(name = "random-client", version, about = "Random SC client")]
 pub struct Cli {
-    #[arg(long, value_name = "SEED", help_heading = "Input")]
+    #[arg(
+        long,
+        value_name = "SEED",
+        help = "Seed. If omitted, reads from stdin/TTY",
+        help_heading = "Input"
+    )]
     pub seed: Option<String>,
 
     #[arg(
         long = "senders",
         value_name = "N",
         default_value_t = DEFAULT_SENDERS,
+        help = "Number of concurrent senders; 0 means auto",
         help_heading = "Throughput"
     )]
     pub max_inflight_sends: usize,
@@ -57,6 +63,7 @@ pub struct Cli {
         long = "reveal-after",
         value_name = "TICKS",
         default_value_t = DEFAULT_REVEAL_DELAY_TICKS,
+        help = "Delay between commit and reveal; must be a positive multiple of 3",
         help_heading = "Timing"
     )]
     pub reveal_delay_ticks: u32,
@@ -65,6 +72,7 @@ pub struct Cli {
         long = "reveal-guard",
         value_name = "TICKS",
         default_value_t = DEFAULT_REVEAL_SEND_GUARD_TICKS,
+        help = "Early-send guard window before the reveal tick",
         help_heading = "Timing"
     )]
     pub reveal_window_ticks: u32,
@@ -73,6 +81,7 @@ pub struct Cli {
         long = "collateral",
         value_name = "AMOUNT",
         default_value_t = DEFAULT_COMMIT_AMOUNT,
+        help = "Collateral tier for commit/reveal sends",
         help_heading = "Throughput"
     )]
     pub commit_amount: u64,
@@ -81,6 +90,7 @@ pub struct Cli {
         long = "pipelines",
         value_name = "N",
         default_value_t = DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT,
+        help = "Number of parallel commit/reveal pipelines",
         help_heading = "Throughput"
     )]
     pub pipeline_count: usize,
@@ -89,6 +99,7 @@ pub struct Cli {
         long = "workers",
         value_name = "N",
         default_value_t = DEFAULT_RUNTIME_THREADS,
+        help = "Tokio worker threads; 0 means auto",
         help_heading = "Throughput"
     )]
     pub worker_threads: usize,
@@ -97,6 +108,7 @@ pub struct Cli {
         long = "tick-poll-ms",
         value_name = "MS",
         default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS,
+        help = "Tick polling interval in milliseconds",
         help_heading = "Timing"
     )]
     pub tick_poll: u64,
@@ -106,17 +118,24 @@ pub struct Cli {
         value_name = "BACKEND",
         value_enum,
         default_value_t = Backend::Rpc,
+        help = "Backend: rpc, bob, grpc",
         help_heading = "Network"
     )]
     pub backend: Backend,
 
-    #[arg(long, value_name = "URL", help_heading = "Network")]
+    #[arg(
+        long,
+        value_name = "URL",
+        help = "Endpoint for the selected backend",
+        help_heading = "Network"
+    )]
     pub endpoint: Option<String>,
 
     #[arg(
         long = "balance-ms",
         value_name = "MS",
         default_value_t = DEFAULT_BALANCE_INTERVAL_MS,
+        help = "Balance print interval in milliseconds",
         help_heading = "Monitoring"
     )]
     pub balance_interval_ms: u64,
@@ -124,8 +143,8 @@ pub struct Cli {
     #[arg(
         long = "empty-check-ms",
         value_name = "MS",
-        default_value_t = DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS
-        ,
+        default_value_t = DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS,
+        help = "Empty-tick check interval in milliseconds",
         help_heading = "Monitoring"
     )]
     pub empty_tick_check_interval_ms: u64,
@@ -134,6 +153,7 @@ pub struct Cli {
         long = "reveal-verify-after",
         value_name = "TICKS",
         default_value_t = DEFAULT_TICK_DATA_MIN_DELAY_TICKS,
+        help = "Delay before checking reveal tick data",
         help_heading = "Monitoring"
     )]
     pub reveal_check_delay_ticks: u32,
@@ -142,6 +162,7 @@ pub struct Cli {
         long = "stop-before-epoch-end-secs",
         value_name = "SECS",
         default_value_t = DEFAULT_EPOCH_STOP_LEAD_TIME_SECS,
+        help = "Stop sending before epoch end",
         help_heading = "Timing"
     )]
     pub epoch_stop_lead_time_secs: u64,
@@ -150,6 +171,7 @@ pub struct Cli {
         long = "resume-after-epoch-start-ticks",
         value_name = "TICKS",
         default_value_t = DEFAULT_EPOCH_RESUME_DELAY_TICKS,
+        help = "Resume sending after epoch start",
         help_heading = "Timing"
     )]
     pub epoch_resume_delay_ticks: u32,
