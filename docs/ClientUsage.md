@@ -34,19 +34,20 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 
 ```text
 --seed <STRING>                Seed (55 chars a-z). If not provided, reads from stdin/TTY
---max-inflight-sends <N>                  Number of transaction senders (default 3; 0 = auto)
---reveal-delay-ticks <N>       Reveal delay relative to commit (positive multiple of 3, default 3)
---reveal-window-ticks <N>  Guard ticks before reveal send (default 6)
---commit-amount <N>            Deposit/stake amount (must be 1/10/.../1_000_000_000, default 10000)
---pipeline-count <N> Number of parallel commit/reveal pipelines (default 3)
---worker-threads <N>          Tokio worker threads (default 0 = auto)
---tick-poll <N>    Tick poll interval (default 1000)
---empty-tick-check-interval-ms <N> Interval for checking whether reveal was sent into an empty tick (ms)
---reveal-check-delay-ticks <N> Minimum tick delay before checking reveal tick data (default 10)
---epoch-stop-lead-time-secs <N> Seconds before Wednesday 12:00 UTC when reveal/commit sending is stopped (default 600)
---epoch-resume-delay-ticks <N> Minimum ticks from epoch initial tick before reveal/commit sending resumes (default 50)
---rpc [URL]                    Use RPC endpoint (default https://rpc.qubic.org)
---balance-interval-ms <N>      Balance print interval (default 600)
+--senders <N>                  Number of transaction senders (default 3; 0 = auto)
+--reveal-after <N>             Reveal delay relative to commit (positive multiple of 3, default 3)
+--reveal-guard <N>             Guard ticks before reveal send (default 6)
+--collateral <N>               Deposit/stake amount (must be 1/10/.../1_000_000_000, default 10000)
+--pipelines <N>                Number of parallel commit/reveal pipelines (default 3)
+--workers <N>                  Tokio worker threads (default 0 = auto)
+--tick-poll-ms <N>             Tick poll interval in milliseconds (default 1000)
+--empty-check-ms <N>           Interval for checking whether reveal was sent into an empty tick (ms)
+--reveal-verify-after <N>      Minimum tick delay before checking reveal tick data (default 10)
+--stop-before-epoch-end-secs <N> Seconds before Wednesday 12:00 UTC when reveal/commit sending is stopped (default 600)
+--resume-after-epoch-start-ticks <N> Minimum ticks from epoch initial tick before reveal/commit sending resumes (default 50)
+--backend <BACKEND>            Backend: rpc, bob, grpc (default rpc)
+--endpoint <URL>               Endpoint for the selected backend
+--balance-ms <N>               Balance print interval (default 600)
 ```
 
 ## Pipeline behavior
@@ -58,17 +59,18 @@ The client binary is `random-client` (see `Cargo.toml`). If `--seed` is not prov
 - If available balance is below `commit_amount`, the pipeline pauses.
 - The transaction is scheduled for a future tick: `current_tick + reveal_delay_ticks`.
 - To prevent non-reveals, a deposit is used: on commit, the deposit is held by the contract; if revealed on time it is returned; otherwise it is forfeited.
-- Sending is blocked during epoch stop window (Wednesday before `12:00 UTC`, controlled by `--epoch-stop-lead-time-secs`).
+- Sending is blocked during epoch stop window (Wednesday before `12:00 UTC`, controlled by `--stop-before-epoch-end-secs`).
 - On entering stop window, if a reveal+commit pair is pending, the client sends reveal-only with zero commit (`commit = 0`) and the same collateral amount, then blocks new reveal/commit sends.
-- Resume condition is `current_tick - initial_tick >= --epoch-resume-delay-ticks` and not being in the stop window.
+- Resume condition is `current_tick - initial_tick >= --resume-after-epoch-start-ticks` and not being in the stop window.
 - After resume condition is met, pipeline continues with normal start (`empty reveal + commit`), then normal reveal+commit cycle.
 - `empty tick` checks and balance polling continue regardless of reveal/commit send pause.
 - If reveal broadcast fails due to an external service (RPC/Bob/network), the client does not retry that reveal; this is intentional.
 
-## RPC usage
+## Backend usage
 
-- Transactions are sent via the RPC endpoint specified in `--rpc`.
-- Tick/balance queries use SCAPI v0.2 (see `docs/Architecture.md`).
+- Transactions are sent via the endpoint specified in `--endpoint`, or the backend default if `--endpoint` is omitted.
+- Backend selection is explicit via `--backend`.
+- The `rpc` backend uses SCAPI v0.2; `bob` and `grpc` use their corresponding adapters (see `docs/Architecture.md`).
 
 ## Shutdown behavior
 
@@ -89,13 +91,13 @@ Run with a custom RPC endpoint and deposit:
 ```bash
 cargo run -- \
   --seed <seed> \
-  --rpc https://rpc.qubic.org \
-  --commit-amount 100000
+  --backend rpc \
+  --endpoint https://rpc.qubic.org \
+  --collateral 100000
 ```
 
 Run with auto senders:
 
 ```bash
-cargo run -- --max-inflight-sends 0
+cargo run -- --senders 0
 ```
-

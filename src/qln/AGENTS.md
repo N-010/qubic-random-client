@@ -25,9 +25,7 @@ enum Backend {
 
 Runtime config fields:
 - `backend: Backend`
-- `grpc_endpoint: String` (example: `http://127.0.0.1:50051`)
-- optional fallback fields for hybrid mode:
-  - `endpoint: String` (RPC fallback for send path)
+- `endpoint: String` (for example: `http://127.0.0.1:50051` for gRPC)
 
 ## QLN module layout (`src/qln`)
 - `src/qln/mod.rs` - exports and integration entry points.

@@ -30,7 +30,7 @@
 ### Ключевые типы/трейты
 - `AppConfig`: `seed`, `runtime: Config`.
 - `Seed`: locked in-memory buffer, zeroized on drop.
-- `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `reveal_window_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `endpoint`, `balance_interval_ms`.
+- `Config`: `max_inflight_sends`, `reveal_delay_ticks`, `reveal_window_ticks`, `commit_amount`, `pipeline_count`, `worker_threads`, `backend`, `endpoint`, `balance_interval_ms`.
 - `TickInfo`: `{ epoch: u32, tick: u32, initial_tick: u32 }`.
 - `TickSource`: `async fn next_tick(&mut self) -> TickInfo`.
 - `ScTransport`: `async fn send_reveal_and_commit(input, amount) -> Result<TxId>`.
@@ -48,7 +48,7 @@
 - QubicWallet derives identity/signature from seed (K12 + FourQ).
 - Seed handling: seed is kept in a locked in-memory buffer (mlock on Unix, VirtualLock on Windows), not cloned, and zeroized on drop; failure to lock aborts startup.
 
-- CLI: seed via stdin/TTY by default; --seed overrides; --rpc used for RPC; SC interaction via SCAPI RequestDataBuilder.
+- CLI: seed via stdin/TTY by default; --seed overrides; backend is selected via --backend and optional --endpoint; SC interaction via SCAPI RequestDataBuilder.
 - commit digest = K12(reveal bits), reveal bits generated via OS CSPRNG.
 
 ## Shutdown behavior (ASCII)
@@ -66,18 +66,17 @@
 - If reveal send fails due to external transport errors, the client does not enqueue a retry for that reveal by design.
 
 ## Bob JSON-RPC (ASCII)
-- When `--bob` is set, the client uses Bob JSON-RPC for tick polling, balance, empty-tick checks, and transaction broadcast.
-- `--bob` accepts an optional URL value right after the flag. If omitted, default Bob endpoint is used.
+- When `--backend bob` is set, the client uses Bob JSON-RPC for tick polling, balance, empty-tick checks, and transaction broadcast.
+- `--endpoint` overrides the Bob endpoint. If omitted, the default Bob endpoint is used.
 
 ## QubicLightNode gRPC (ASCII)
 - Backend selection:
-  - default: RPC,
-  - `--bob [url]` for Bob backend,
-  - `--grpc [url]` for QubicLightNode gRPC backend.
+  - default: `--backend rpc`,
+  - `--backend bob` for Bob backend,
+  - `--backend grpc` for QubicLightNode gRPC backend.
 - For `qln-grpc`, the client uses QubicLightNode gRPC for:
   - tick polling (`GetStatus`),
   - balance watcher (`GetBalance`),
   - empty-tick checks (`GetTickTransactions`),
   - SC send path (`BroadcastTransaction`).
-- `--grpc` can include endpoint URL right after the flag; if omitted, default is `http://127.0.0.1:50051`.
-
+- `--endpoint` overrides the gRPC endpoint; if omitted, default is `http://127.0.0.1:50051`.

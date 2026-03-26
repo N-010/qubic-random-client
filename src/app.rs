@@ -46,7 +46,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         Arc<dyn TickDataFetcher>,
     ) = match runtime.backend {
         Backend::Bob => {
-            let bob_rpc = Arc::new(BobRpcClient::with_base_url(&runtime.bob_endpoint));
+            let bob_rpc = Arc::new(BobRpcClient::with_base_url(&runtime.endpoint));
             (
                 Arc::new(BobScapiClient::new(bob_rpc.clone())),
                 Arc::new(BobContractTransport::new(
@@ -60,7 +60,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
             )
         }
         Backend::QlnGrpc => {
-            let qln = Arc::new(QlnGrpcClient::new(&runtime.grpc_endpoint).map_err(|err| {
+            let qln = Arc::new(QlnGrpcClient::new(&runtime.endpoint).map_err(|err| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("failed to create qln grpc client: {err}"),
@@ -412,8 +412,6 @@ mod tests {
             reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
-            bob_endpoint: "bob".to_string(),
-            grpc_endpoint: "http://127.0.0.1:50051".to_string(),
         };
 
         let shutdown_notify = notify.clone();

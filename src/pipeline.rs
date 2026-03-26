@@ -552,8 +552,6 @@ mod tests {
             reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
-            bob_endpoint: "bob".to_string(),
-            grpc_endpoint: "http://127.0.0.1:50051".to_string(),
         }
     }
 
