@@ -1,164 +1,279 @@
 # Random Client
 
-Client for the Qubic Random smart contract. It runs the `commit -> reveal`
-cycle for `RANDOM::RevealAndCommit()` and sends transactions through the
-selected backend.
+`Random Client` is a program for the Qubic Random smart contract.
+It works automatically in a loop:
 
-## What It Does
+1. it sends a hidden value,
+2. waits a few ticks,
+3. reveals that value,
+4. prepares the next round.
 
-- Generates 4096 random bits.
-- Sends a commit first: only the digest of those bits.
-- After a delay, sends the reveal for the previous commit and a new commit for
-  the next round.
-- Monitors balance and pauses when there is not enough collateral.
-- Supports multiple parallel pipelines and multiple backends.
+In simple words, this tool keeps your participation in the Random contract
+running without manual action every few ticks.
 
-Related technical docs:
+## What This Program Is For
 
-- `docs/Random.h` for the SC input structure.
+This README is written for normal users: people who want to build and run the
+program, even if they are not deeply technical.
 
-## How It Works
+If you only need the short version:
 
-1. The client generates random bits from the OS.
-2. It computes a digest of those bits.
-3. It sends a commit-only transaction with an empty reveal and that digest.
-4. It waits a few ticks. Default is `3`.
-5. It sends the previous reveal plus a new digest for the next cycle.
-6. The cycle repeats continuously.
+1. build the program,
+2. prepare your seed,
+3. run it,
+4. leave it working.
 
-This means every reveal proves the data promised by the previous commit.
+## What The Program Does
 
-The client also does the following while running:
+While it is running, the program:
 
-- Watches ticks to know when to send.
-- Watches balance to avoid sending without enough collateral.
-- Verifies reveal ticks later to detect empty-tick cases.
-- On shutdown, tries to send the pending reveal before exit.
+- watches Qubic ticks,
+- sends transactions at the right moment,
+- checks your balance,
+- pauses itself if balance is too low,
+- avoids sending too close to epoch end,
+- tries to send the last pending reveal before shutdown.
 
-## Requirements
+You do not need to manage each commit and reveal manually.
 
-- Rust edition 2024.
-- A valid seed: exactly 55 lowercase `a-z` characters.
-- Access to one backend endpoint:
+## What You Need Before Starting
+
+- Rust installed on your computer.
+- A valid seed.
+  The seed must be exactly `55` lowercase English letters: `a-z`.
+- Access to one backend.
+  Default choices are:
   - `rpc`: `https://rpc.qubic.org`
   - `bob`: `http://localhost:40420/qubic`
   - `grpc`: `http://127.0.0.1:50051`
-- Enough balance for the selected collateral tier.
+- Enough Qubic balance for the collateral amount you want to use.
 
 ## Build
+
+Run this command in the project folder:
 
 ```bash
 cargo build --release
 ```
 
-## Quick Start
+After the build finishes, the executable file will be here:
 
-Run with the seed on the command line:
+- `target/release/RandomCient` on Linux/macOS
+- `target/release/RandomCient.exe` on Windows
+
+## First Start
+
+The easiest launch command is:
 
 ```bash
-cargo run --release -- --seed <55-char-seed>
+cargo run --release -- --seed <your-55-char-seed>
 ```
 
-Or run without `--seed` and enter it interactively:
+If you do not want to put the seed in the command line, run:
 
 ```bash
 cargo run --release
 ```
 
-Example with explicit backend, endpoint, and collateral:
+The program will ask you to enter the seed.
+
+## Simple Launch Examples
+
+Use the default public RPC:
 
 ```bash
-cargo run --release -- \
-  --seed <seed> \
-  --backend rpc \
-  --endpoint https://rpc.qubic.org \
-  --collateral 100000
+cargo run --release -- --seed <your-seed>
 ```
 
-Example with Bob:
+Use Bob:
 
 ```bash
 cargo run --release -- \
-  --seed <seed> \
+  --seed <your-seed> \
   --backend bob \
   --endpoint http://localhost:40420/qubic
 ```
 
-Example with automatic sender count:
+Use gRPC / QubicLightNode:
 
 ```bash
-cargo run --release -- --seed <seed> --senders 0
+cargo run --release -- \
+  --seed <your-seed> \
+  --backend grpc \
+  --endpoint http://127.0.0.1:50051
 ```
 
-## Main Options
+Run the already built executable directly:
+
+```bash
+target/release/RandomCient --seed <your-seed>
+```
+
+On Windows:
+
+```powershell
+target\release\RandomCient.exe --seed <your-seed>
+```
+
+## What You Will See In The Logs
+
+The program prints simple status messages.
+Usually they tell you:
+
+- which backend is being used,
+- current epoch and tick,
+- current balance,
+- whether a commit was prepared,
+- whether a reveal was sent,
+- whether a transaction was accepted,
+- whether the program is waiting because of timing or low balance.
+
+There is also a reveal summary with:
+
+- successful,
+- failed,
+- empty,
+- percentages.
+
+## The Most Important Options
+
+Most users only need these settings:
+
+- `--seed <SEED>`
+  Your private seed. Keep it secret.
+- `--backend <rpc|bob|grpc>`
+  Which connection type to use.
+- `--endpoint <URL>`
+  Custom server address for the selected backend.
+- `--collateral <AMOUNT>`
+  The amount attached to each send.
+- `--pipelines <N>`
+  How many parallel work chains to run.
+- `--senders <N>`
+  How many transactions may be sent at the same time.
+
+## What The Options Mean In Simple Words
+
+- `--collateral`
+  This is the amount used in commit and reveal transactions.
+  Allowed values are only:
+  `1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000`.
+- `--pipelines`
+  More pipelines means more parallel commit/reveal chains.
+- `--senders`
+  More senders means more transactions can be sent at the same time.
+  `0` means automatic choice.
+- `--reveal-after`
+  How many ticks to wait before reveal.
+  Must be a positive multiple of `3`.
+- `--reveal-guard`
+  Lets the program send a little earlier so it does not miss the target tick.
+- `--tick-poll-ms`
+  How often the program checks for a new tick.
+- `--balance-ms`
+  How often balance is refreshed.
+- `--empty-check-ms`
+  How often old reveal ticks are checked later.
+- `--reveal-verify-after`
+  How many ticks to wait before checking whether reveal data appeared.
+- `--stop-before-epoch-end-secs`
+  How early the program should stop creating new work before epoch end.
+- `--resume-after-epoch-start-ticks`
+  How long to wait after a new epoch starts before working again.
+- `--workers`
+  Number of runtime worker threads.
+  `0` means automatic choice.
+
+## Recommended Starting Point
+
+If you are not sure what to choose, start with defaults and only pass:
+
+- `--seed`
+- optionally `--backend`
+- optionally `--endpoint`
+
+For example:
+
+```bash
+cargo run --release -- --seed <your-seed> --backend rpc
+```
+
+## When It Is Normal For The Program To Wait
+
+Sometimes the program waits on purpose. This is normal.
+
+Typical reasons:
+
+- the balance is lower than the selected collateral amount,
+- it is too early to send reveal,
+- the epoch is close to ending,
+- the program is waiting for the safe start period of a new epoch.
+
+## Common Problems
+
+- `seed from stdin is empty`
+  No seed was provided.
+- `seed must be 55 characters`
+  The seed length is wrong.
+- `seed must contain only a-z characters`
+  The seed contains invalid characters.
+- `--reveal-after must be a positive multiple of 3`
+  The reveal delay value is not allowed.
+- `--collateral must be one of ...`
+  The collateral value is invalid.
+- `VirtualLock failed` or `mlock failed`
+  The operating system refused to lock seed memory.
+
+## Useful Commands
+
+Show help:
+
+```bash
+cargo run --release -- --help
+```
+
+Use automatic sender count:
+
+```bash
+cargo run --release -- --seed <your-seed> --senders 0
+```
+
+Use a larger collateral amount:
+
+```bash
+cargo run --release -- --seed <your-seed> --collateral 100000
+```
+
+Use more parallel pipelines:
+
+```bash
+cargo run --release -- --seed <your-seed> --pipelines 5
+```
+
+## Full List Of Main Options
 
 ```text
---seed <SEED>                             Seed. If omitted, reads from stdin/TTY
---backend <BACKEND>                       Backend: rpc, bob, grpc
---endpoint <URL>                          Endpoint for the selected backend
---collateral <AMOUNT>                     Collateral tier for commit/reveal sends
---senders <N>                             Number of concurrent senders
---pipelines <N>                           Number of parallel commit/reveal pipelines
---reveal-after <TICKS>                    Delay between commit and reveal
---reveal-guard <TICKS>                    Early-send guard window before reveal tick
---tick-poll-ms <MS>                       Tick polling interval
---balance-ms <MS>                         Balance print interval
---empty-check-ms <MS>                     Empty-tick check interval
---reveal-verify-after <TICKS>             Delay before reveal tick verification
---stop-before-epoch-end-secs <SECS>       Stop sending before epoch end
---resume-after-epoch-start-ticks <TICKS>  Resume sending after epoch start
---workers <N>                             Tokio worker threads
+--seed <SEED>
+--backend <BACKEND>
+--endpoint <URL>
+--collateral <AMOUNT>
+--senders <N>
+--pipelines <N>
+--reveal-after <TICKS>
+--reveal-guard <TICKS>
+--tick-poll-ms <MS>
+--balance-ms <MS>
+--empty-check-ms <MS>
+--reveal-verify-after <TICKS>
+--stop-before-epoch-end-secs <SECS>
+--resume-after-epoch-start-ticks <TICKS>
+--workers <N>
 ```
 
-## Option Meaning
+## Technical Notes
 
-- `--seed`: secret used to derive identity and signatures. Keep it private.
-- `--backend`: chooses transport stack:
-  - `rpc` uses SCAPI RPC.
-  - `bob` uses Bob JSON-RPC.
-  - `grpc` uses QubicLightNode gRPC.
-- `--endpoint`: overrides the default endpoint for the selected backend.
-- `--collateral`: amount sent with commit and reveal+commit transactions. Must
-  be one of the contract tiers:
-  `1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000`.
-- `--senders`: max number of concurrent transaction sends. `0` means auto.
-- `--pipelines`: number of parallel commit/reveal chains.
-- `--reveal-after`: must be a positive multiple of `3`.
-- `--reveal-guard`: allows sending a reveal slightly before its exact target
-  tick to tolerate slower polling.
-- `--tick-poll-ms`: how often the client polls for new ticks.
-- `--balance-ms`: how often current balance is printed.
-- `--empty-check-ms`: how often reveal ticks are checked for empty-tick cases.
-- `--reveal-verify-after`: minimum tick delay before checking reveal tick data.
-- `--stop-before-epoch-end-secs`: prevents sending too close to epoch end.
-- `--resume-after-epoch-start-ticks`: warmup period after new epoch start.
-- `--workers`: Tokio worker threads. `0` means auto.
-
-## Runtime Behavior
-
-- Normal cycle:
-  - commit-only first
-  - then reveal + new commit
-- If balance is below the selected collateral amount, the pipeline pauses.
-- In the stop window, the client stops creating new commit/reveal work.
-- On stop-window entry or shutdown, pending work is sent as reveal-only with
-  `commit = 0`.
-- If reveal broadcast fails due to external transport/backend errors, that
-  reveal is not retried by design.
-
-## Common Errors
-
-- `seed from stdin is empty`: no seed was provided.
-- `seed must be 55 characters`: wrong seed length.
-- `seed must contain only a-z characters`: invalid seed characters.
-- `--reveal-after must be a positive multiple of 3`: invalid reveal delay.
-- `--collateral must be one of ...`: invalid collateral tier.
-- `VirtualLock` / `mlock` errors: the OS failed to lock seed memory.
-
-## Notes
-
-- The seed is stored in locked memory and zeroized on drop.
-- For `rpc`, pass the base URL only; the client appends the SCAPI path parts it
-  needs.
-- The client binary name comes from `Cargo.toml`; when running through Cargo,
-  use `cargo run --release -- ...`.
+- The seed is stored in locked memory and cleared on drop.
+- For `rpc`, pass only the base URL.
+  The program adds the SCAPI path parts itself.
+- If you do not pass an option, the program uses built-in defaults.
+- Developer-facing contract details are in `docs/Random.h`.
