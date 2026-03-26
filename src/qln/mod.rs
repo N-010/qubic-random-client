@@ -260,8 +260,8 @@ impl ScTransport for QlnContractTransport {
         ensure_amount_available(&self.balance_state, amount)?;
 
         console::log_info(format!(
-            "qln tx[{pipeline_id}]: build+send amount={amount} tick={tick} input_type={input_type}",
-            input_type = self.input_type,
+            "Sending transaction for tick {tick} through gRPC (worker {}, amount {amount})",
+            pipeline_id + 1,
         ));
         let tx_bytes = build_reveal_and_commit_tx_bytes(
             &self.wallet,
@@ -277,20 +277,21 @@ impl ScTransport for QlnContractTransport {
             .await
             .map_err(|message| {
                 console::log_warn(format!(
-                    "qln tx[{pipeline_id}]: broadcast failed: {message}"
+                    "gRPC rejected the transaction for tick {tick}: {message}"
                 ));
                 TransportError { message }
             })?;
         let tx_id = map_broadcast_transaction_response(response).map_err(|message| {
             console::log_warn(format!(
-                "qln tx[{pipeline_id}]: broadcast rejected: {message}"
+                "gRPC did not accept the transaction for tick {tick}: {message}"
             ));
             TransportError { message }
         })?;
 
         console::log_info(format!(
-            "qln tx[{pipeline_id}]: broadcast ok tx_id={tx_id}",
-            tx_id = console::shorten_id(&tx_id)
+            "Transaction for tick {tick} was accepted by gRPC (worker {}, tx {})",
+            pipeline_id + 1,
+            console::shorten_id(&tx_id)
         ));
         Ok(tx_id)
     }

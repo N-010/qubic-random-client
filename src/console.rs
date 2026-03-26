@@ -51,7 +51,6 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init() {
     let _ = STATUS.set(Mutex::new(Status::default()));
-    log_info("console initialized");
 }
 
 pub fn set_balance_line(line: impl Into<String>) {
@@ -64,7 +63,7 @@ pub fn set_balance_line(line: impl Into<String>) {
 }
 
 pub fn set_backend(value: impl Into<String>) {
-    let value = value.into();
+    let value = display_backend(&value.into());
     if let Some(status) = STATUS.get()
         && let Ok(mut status) = status.lock()
     {
@@ -130,10 +129,25 @@ fn log_with_level(level: &str, message: String) {
 
 fn format_log_line(level: &str, status: &Status, message: &str) -> String {
     let level = colorize_level(level);
-    format!(
-        "[{level}] backend={} epoch={} tick={} balance={} reveal={} | {message}",
-        status.backend, status.epoch, status.tick, status.balance, status.reveal_ratio
-    )
+    let mut context = Vec::new();
+    if !status.backend.is_empty() {
+        context.push(status.backend.clone());
+    }
+    if !status.epoch.is_empty() && !status.tick.is_empty() {
+        context.push(format!("Epoch {}, tick {}", status.epoch, status.tick));
+    }
+    if !status.balance.is_empty() {
+        context.push(format!("Balance: {}", status.balance));
+    }
+    if status.reveal_ratio != "n/a" {
+        context.push(format!("Reveals: {}", status.reveal_ratio));
+    }
+
+    if context.is_empty() {
+        format!("[{level}] {message}")
+    } else {
+        format!("[{level}] {message} | {}", context.join(" | "))
+    }
 }
 
 pub fn record_reveal_result(success: bool) {
@@ -197,8 +211,24 @@ fn format_reveal_ratio(success: u64, failed: u64, empty: u64) -> String {
     let fail_percent = (failed as f64) * 100.0 / total_f;
     let empty_percent = (empty as f64) * 100.0 / total_f;
     format!(
-        "ok={success}({ok_percent:.1}%) fail={failed}({fail_percent:.1}%) empty={empty}({empty_percent:.1}%)"
+        "{success} ok ({ok_percent:.1}%), {failed} failed ({fail_percent:.1}%), {empty} empty ({empty_percent:.1}%)"
     )
+}
+
+fn display_backend(value: &str) -> String {
+    if value.eq_ignore_ascii_case("rpc") {
+        return "RPC".to_string();
+    }
+
+    if value.eq_ignore_ascii_case("bob") {
+        return "Bob".to_string();
+    }
+
+    if value.eq_ignore_ascii_case("grpc") {
+        return "gRPC".to_string();
+    }
+
+    value.to_string()
 }
 
 fn colorize_level(level: &str) -> String {
@@ -310,7 +340,7 @@ mod tests {
         let line = format_log_line("INFO", &status, "hello");
         assert_eq!(
             line,
-            "[\u{1b}[32mINFO\u{1b}[0m] backend=rpc epoch=e tick=t balance=b reveal=r | hello"
+            "[\u{1b}[32mINFO\u{1b}[0m] hello | rpc | Epoch e, tick t | Balance: b | Reveals: r"
         );
     }
 
@@ -347,7 +377,7 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(
             status.reveal_ratio,
-            "ok=1(33.3%) fail=1(33.3%) empty=1(33.3%)"
+            "1 ok (33.3%), 1 failed (33.3%), 1 empty (33.3%)"
         );
     }
 
