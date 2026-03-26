@@ -89,14 +89,16 @@ impl TickDataWatcher {
                 for tick in ticks {
                     match fetcher.fetch(tick).await {
                         Ok(None) => {
-                            console::log_warn(format!("tick data empty: tick={tick}"));
+                            console::log_warn(format!(
+                                "Tick {tick} does not contain the expected transaction yet"
+                            ));
                             console::record_reveal_empty();
                         }
                         Ok(Some(())) => {
-                            console::log_info(format!("tick data ok: tick={tick}"));
+                            console::log_info(format!("Transaction for tick {tick} was confirmed"));
                         }
                         Err(err) => {
-                            console::log_warn(format!("tick data check failed: {err}"));
+                            console::log_warn(format!("Could not verify tick {tick} yet: {err}"));
                             let mut state = check_state.lock().await;
                             state.ticks.insert(tick);
                         }

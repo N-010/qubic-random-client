@@ -16,7 +16,7 @@ use config::AppConfig;
 
 fn main() -> AppResult<()> {
     let config = AppConfig::from_cli().map_err(|err| {
-        eprintln!("config error: {}", err);
+        eprintln!("Configuration error: {err}");
         err
     })?;
 

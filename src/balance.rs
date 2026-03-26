@@ -48,7 +48,7 @@ pub async fn run_balance_watcher(
                 state.set_amount(total);
             }
             Err(err) => {
-                console::log_warn(format!("balance watcher error: {}", err));
+                console::log_warn(format!("Could not refresh the balance: {err}"));
                 state.set_amount(0);
             }
         }
@@ -58,7 +58,7 @@ pub async fn run_balance_watcher(
 
 fn format_balances(entries: &[BalanceEntry]) -> (String, u64) {
     if entries.is_empty() {
-        return ("empty".to_string(), 0);
+        return ("not available yet".to_string(), 0);
     }
 
     let mut total = 0u64;
@@ -66,10 +66,10 @@ fn format_balances(entries: &[BalanceEntry]) -> (String, u64) {
     for entry in entries {
         let asset = console::shorten_id(&entry.asset);
         let amount = console::format_amount(entry.amount);
-        parts.push(format!("{asset}={amount}"));
+        parts.push(format!("{asset}: {amount}"));
         total = total.saturating_add(entry.amount);
     }
-    (parts.join(" | "), total)
+    (parts.join(", "), total)
 }
 
 #[cfg(test)]
@@ -215,9 +215,9 @@ mod tests {
 
     #[test]
     fn format_balances_empty() {
-        // Empty list yields "empty" and zero total.
+        // Empty list yields a friendly placeholder and zero total.
         let (line, total) = format_balances(&[]);
-        assert_eq!(line, "empty");
+        assert_eq!(line, "not available yet");
         assert_eq!(total, 0);
     }
 
@@ -235,8 +235,8 @@ mod tests {
             },
         ];
         let (line, total) = format_balances(&entries);
-        assert!(line.contains("AAAAAA=1.000"));
-        assert!(line.contains("BBBBBB=25"));
+        assert!(line.contains("AAAAAA: 1.000"));
+        assert!(line.contains("BBBBBB: 25"));
         assert_eq!(total, 1_025);
     }
 }

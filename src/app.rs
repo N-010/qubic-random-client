@@ -33,7 +33,7 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         Backend::QlnGrpc => "grpc",
     };
     console::set_backend(backend_name);
-    console::log_info(format!("backend selected: {backend_name}"));
+    console::log_info(format!("Using {backend_name} connection"));
     let scapi_wallet = wallet_from_seed(seed.expose())?;
     drop(seed);
     let contract_id = default_contract_id()?;
@@ -164,7 +164,7 @@ async fn run_with_components(
     shutdown_pipelines(&pipeline_txs, transport.clone()).await;
     drop(job_tx);
     if let Err(err) = dispatcher_handle.await {
-        console::log_warn(format!("job dispatcher task failed: {err}"));
+        console::log_warn(format!("Background sender stopped unexpectedly: {err}"));
     }
     console::shutdown().await;
     result
@@ -188,7 +188,9 @@ async fn shutdown_pipelines(
                 .send_reveal_and_commit(job.input, job.amount, job.tick, job.pipeline_id)
                 .await
         {
-            console::log_warn(format!("shutdown RevealAndCommit failed: {err}"));
+            console::log_warn(format!(
+                "Could not send the last pending reveal during shutdown: {err}"
+            ));
         }
     }
 }
@@ -243,14 +245,16 @@ async fn wait_for_shutdown_signal() -> AppResult<()> {
 
 fn wallet_from_seed(seed: &str) -> AppResult<ScapiQubicWallet> {
     ScapiQubicWallet::from_seed(seed).map_err(|err| {
-        console::log_warn(format!("failed to derive scapi wallet from seed: {}", err));
+        console::log_warn(format!(
+            "Could not create a wallet from the provided seed: {err}"
+        ));
         std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into()
     })
 }
 
 fn default_contract_id() -> AppResult<ScapiQubicId> {
     ScapiQubicId::from_str(DEFAULT_CONTRACT_ID).map_err(|err| {
-        console::log_warn(format!("invalid default contract id: {}", err));
+        console::log_warn(format!("Built-in contract id is invalid: {err}"));
         std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into()
     })
 }
