@@ -1,137 +1,164 @@
 # Random Client
 
-Client for the Random smart contract (SC) on the Qubic network. Implements the
-commit -> reveal cycle for the `RANDOM::RevealAndCommit()` procedure and sends
-transactions via the selected backend.
+Client for the Qubic Random smart contract. It runs the `commit -> reveal`
+cycle for `RANDOM::RevealAndCommit()` and sends transactions through the
+selected backend.
 
-## What it does
-- Generates 4096 bits of entropy and submits a commit (digest).
-- After a configured number of ticks, sends the reveal for the previous commit
-  plus a new commit.
-- Monitors balance and pauses the pipeline when funds are insufficient.
-- Supports multiple parallel senders.
+## What It Does
 
-A short protocol overview is in `docs/ShortDescriptio.txt`, the client
-architecture is in `docs/Architecture.md`, and the input structure is in
-`docs/Random.h`.
+- Generates 4096 random bits.
+- Sends a commit first: only the digest of those bits.
+- After a delay, sends the reveal for the previous commit and a new commit for
+  the next round.
+- Monitors balance and pauses when there is not enough collateral.
+- Supports multiple parallel pipelines and multiple backends.
+
+Related technical docs:
+
+- `docs/Random.h` for the SC input structure.
+
+## How It Works
+
+1. The client generates random bits from the OS.
+2. It computes a digest of those bits.
+3. It sends a commit-only transaction with an empty reveal and that digest.
+4. It waits a few ticks. Default is `3`.
+5. It sends the previous reveal plus a new digest for the next cycle.
+6. The cycle repeats continuously.
+
+This means every reveal proves the data promised by the previous commit.
+
+The client also does the following while running:
+
+- Watches ticks to know when to send.
+- Watches balance to avoid sending without enough collateral.
+- Verifies reveal ticks later to detect empty-tick cases.
+- On shutdown, tries to send the pending reveal before exit.
 
 ## Requirements
-- Rust (edition 2024).
-- Access to one supported backend endpoint:
-  - RPC (default: `https://rpc.qubic.org`)
-  - Bob JSON-RPC (default: `http://localhost:40420/qubic`)
-  - QubicLightNode gRPC (default: `http://127.0.0.1:50051`)
+
+- Rust edition 2024.
+- A valid seed: exactly 55 lowercase `a-z` characters.
+- Access to one backend endpoint:
+  - `rpc`: `https://rpc.qubic.org`
+  - `bob`: `http://localhost:40420/qubic`
+  - `grpc`: `http://127.0.0.1:50051`
+- Enough balance for the selected collateral tier.
 
 ## Build
+
 ```bash
-cargo build
+cargo build --release
 ```
 
-## Run
+## Quick Start
+
+Run with the seed on the command line:
+
 ```bash
-cargo run -- --seed <your_seed>
+cargo run --release -- --seed <55-char-seed>
 ```
 
-If `--seed` is not provided, the seed is read from stdin/TTY.
+Or run without `--seed` and enter it interactively:
 
-### Seed format
-- Exactly 55 characters.
-- Lowercase `a-z` only.
+```bash
+cargo run --release
+```
 
-## CLI options
+Example with explicit backend, endpoint, and collateral:
+
+```bash
+cargo run --release -- \
+  --seed <seed> \
+  --backend rpc \
+  --endpoint https://rpc.qubic.org \
+  --collateral 100000
+```
+
+Example with Bob:
+
+```bash
+cargo run --release -- \
+  --seed <seed> \
+  --backend bob \
+  --endpoint http://localhost:40420/qubic
+```
+
+Example with automatic sender count:
+
+```bash
+cargo run --release -- --seed <seed> --senders 0
+```
+
+## Main Options
+
 ```text
---seed <seed>                             Seed (55 chars, a-z)
---senders <n>                             Number of senders (default: 3; 0 = auto)
---reveal-after <ticks>                    Reveal delay in ticks (default: 3)
---reveal-guard <ticks>                    Guard ticks before reveal send (default: 6)
---collateral <amount>                     Collateral amount (must be 1/10/.../1_000_000_000, default: 10000)
---pipelines <n>                           Number of parallel pipelines (default: 3)
---workers <n>                             Runtime threads (0 = auto)
---tick-poll-ms <ms>                       Tick polling interval (default: 1000)
---balance-ms <ms>                         Balance print interval (default: 600)
---empty-check-ms <ms>                     Reveal empty-tick check interval (default: 600)
---reveal-verify-after <ticks>             Minimum tick distance before reveal checks (default: 10)
---stop-before-epoch-end-secs <secs>       Pause before epoch end (default: 600)
---resume-after-epoch-start-ticks <ticks>  Resume delay after new epoch starts (default: 50)
---backend <backend>                       Backend: rpc, bob, grpc (default: rpc)
---endpoint <url>                          Endpoint for the selected backend
+--seed <SEED>                             Seed. If omitted, reads from stdin/TTY
+--backend <BACKEND>                       Backend: rpc, bob, grpc
+--endpoint <URL>                          Endpoint for the selected backend
+--collateral <AMOUNT>                     Collateral tier for commit/reveal sends
+--senders <N>                             Number of concurrent senders
+--pipelines <N>                           Number of parallel commit/reveal pipelines
+--reveal-after <TICKS>                    Delay between commit and reveal
+--reveal-guard <TICKS>                    Early-send guard window before reveal tick
+--tick-poll-ms <MS>                       Tick polling interval
+--balance-ms <MS>                         Balance print interval
+--empty-check-ms <MS>                     Empty-tick check interval
+--reveal-verify-after <TICKS>             Delay before reveal tick verification
+--stop-before-epoch-end-secs <SECS>       Stop sending before epoch end
+--resume-after-epoch-start-ticks <TICKS>  Resume sending after epoch start
+--workers <N>                             Tokio worker threads
 ```
 
-## Parameter details
-### --seed
-Required secret used to derive commits. Must be exactly 55 lowercase letters.
-Changing the seed changes all generated commits and reveals. Keep it private.
+## Option Meaning
 
-### --senders
-Maximum number of concurrent transaction sends. Higher values increase throughput but
-also increase pressure on the endpoint. Set to 1 for strictly sequential
-sending. If set to 0, the value is replaced with available CPU parallelism.
+- `--seed`: secret used to derive identity and signatures. Keep it private.
+- `--backend`: chooses transport stack:
+  - `rpc` uses SCAPI RPC.
+  - `bob` uses Bob JSON-RPC.
+  - `grpc` uses QubicLightNode gRPC.
+- `--endpoint`: overrides the default endpoint for the selected backend.
+- `--collateral`: amount sent with commit and reveal+commit transactions. Must
+  be one of the contract tiers:
+  `1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000`.
+- `--senders`: max number of concurrent transaction sends. `0` means auto.
+- `--pipelines`: number of parallel commit/reveal chains.
+- `--reveal-after`: must be a positive multiple of `3`.
+- `--reveal-guard`: allows sending a reveal slightly before its exact target
+  tick to tolerate slower polling.
+- `--tick-poll-ms`: how often the client polls for new ticks.
+- `--balance-ms`: how often current balance is printed.
+- `--empty-check-ms`: how often reveal ticks are checked for empty-tick cases.
+- `--reveal-verify-after`: minimum tick delay before checking reveal tick data.
+- `--stop-before-epoch-end-secs`: prevents sending too close to epoch end.
+- `--resume-after-epoch-start-ticks`: warmup period after new epoch start.
+- `--workers`: Tokio worker threads. `0` means auto.
 
-### --reveal-after
-Base delay (in ticks) between a commit and its reveal. Larger values spread out
-reveal traffic and reduce overlap but increase the time until a reveal is sent.
-Smaller values make the cycle faster but can be less tolerant to network delays.
-Value must be a positive multiple of 3 to keep SC stream alignment.
+## Runtime Behavior
 
-### --reveal-guard
-Guard window (in ticks) before the scheduled reveal tick. The pipeline waits
-until `now_tick >= reveal_send_at_tick - guard` before sending a reveal+commit.
-Larger values send reveals earlier; smaller values wait closer to the reveal
-tick.
+- Normal cycle:
+  - commit-only first
+  - then reveal + new commit
+- If balance is below the selected collateral amount, the pipeline pauses.
+- In the stop window, the client stops creating new commit/reveal work.
+- On stop-window entry or shutdown, pending work is sent as reveal-only with
+  `commit = 0`.
+- If reveal broadcast fails due to external transport/backend errors, that
+  reveal is not retried by design.
 
-### --collateral
-Amount sent with each commit/reveal transaction. Must be one of SC collateral
-tiers: `1, 10, 100, ..., 1_000_000_000`. Larger values require more balance
-and can cause the pipeline to pause when funds are insufficient.
+## Common Errors
 
-### --pipelines
-Number of parallel pipelines. Higher values increase throughput and staggering,
-but also increase concurrent in-flight commitments.
+- `seed from stdin is empty`: no seed was provided.
+- `seed must be 55 characters`: wrong seed length.
+- `seed must contain only a-z characters`: invalid seed characters.
+- `--reveal-after must be a positive multiple of 3`: invalid reveal delay.
+- `--collateral must be one of ...`: invalid collateral tier.
+- `VirtualLock` / `mlock` errors: the OS failed to lock seed memory.
 
-### --workers
-Tokio runtime worker threads. Use 0 for auto (based on CPU count). Higher values
-can improve concurrency on busy systems.
+## Notes
 
-### --tick-poll-ms
-Polling interval for fetching tick info from the selected backend. Smaller values
-reduce latency but increase load on the endpoint.
-
-### --backend
-Selects which transport stack the client uses:
-- `rpc` for classic SCAPI RPC
-- `bob` for Bob JSON-RPC
-- `grpc` for QubicLightNode gRPC
-
-### --endpoint
-Overrides the endpoint for the selected backend.
-For `rpc`, pass only the base endpoint (`ip:port` or `scheme://host:port`), without `/live/v1` or `/query/v1`.
-If omitted, the client uses the default endpoint for the selected backend.
-
-### --balance-ms
-How often the balance is printed/logged. Smaller values produce more frequent
-logging.
-
-### --empty-check-ms
-How often (in ms) the client checks whether reveal was sent into an empty tick.
-Smaller values can reduce reaction latency, but increase load on the selected backend.
-
-### --reveal-verify-after
-Minimum number of ticks between current tick and reveal target tick before the
-client starts active reveal checks.
-
-### --stop-before-epoch-end-secs
-How many seconds before expected epoch boundary the pipeline is paused to avoid
-sending too close to epoch switch.
-
-### --resume-after-epoch-start-ticks
-How many ticks the client waits after epoch switch before resuming pipeline work.
-
-## Important details
-- Each transaction contains the reveal for the previous commit plus a new commit.
-- Backend selection is explicit via `--backend`.
-- `--endpoint` applies to whichever backend is selected.
-- In stop window and on shutdown, reveal-only is sent with `commit=0` and the
-  same collateral amount as the pending commit.
-- The seed is kept in locked memory and zeroized on shutdown.
-- On shutdown, a pending reveal is sent synchronously.
-
+- The seed is stored in locked memory and zeroized on drop.
+- For `rpc`, pass the base URL only; the client appends the SCAPI path parts it
+  needs.
+- The client binary name comes from `Cargo.toml`; when running through Cargo,
+  use `cargo run --release -- ...`.
