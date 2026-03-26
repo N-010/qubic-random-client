@@ -83,6 +83,7 @@ pub struct Pipeline {
 struct PendingCommit {
     reveal_send_at_tick: u32,
     revealed_bits: [u8; 512],
+    collateral_amount: u64,
 }
 
 impl Pipeline {
@@ -109,23 +110,23 @@ impl Pipeline {
                 .saturating_add(self.config.reveal_delay_ticks)
                 .saturating_add(self.id_tick_offset());
             let reveal_tick = current_tick.max(pending.reveal_send_at_tick);
-            let committed_digest = commit_digest(&pending.revealed_bits);
             let reveal_input = RevealAndCommitInput {
                 revealed_bits: pending.revealed_bits,
-                committed_digest,
+                committed_digest: [0u8; 32],
             };
             let reveal_job = RevealCommitJob {
                 input: reveal_input,
-                amount: 0,
+                amount: pending.collateral_amount,
                 tick: reveal_tick,
                 kind: RevealCommitKind::Reveal,
                 pipeline_id: self.id,
             };
 
             console::log_info(format!(
-                "pipeline[{id}] shutdown reveal: now_tick={now_tick} reveal_tick={reveal_tick} amount=0",
+                "pipeline[{id}] shutdown reveal-only: now_tick={now_tick} reveal_tick={reveal_tick} amount={amount}",
                 id = self.id,
                 now_tick = self.tick_info.tick,
+                amount = pending.collateral_amount,
             ));
             reveal_job
         })
@@ -232,6 +233,7 @@ impl Pipeline {
         self.pending = Some(PendingCommit {
             reveal_send_at_tick: scheduled_tick.saturating_add(reveal_delay),
             revealed_bits,
+            collateral_amount: self.config.commit_amount,
         });
         true
     }
@@ -257,16 +259,17 @@ impl Pipeline {
                     revealed_bits,
                     committed_digest: [0u8; 32],
                 },
-                amount: 0,
+                amount: pending.collateral_amount,
                 tick: reveal_send_at_tick,
                 kind: RevealCommitKind::Reveal,
                 pipeline_id: self.id,
             };
 
             console::log_info(format!(
-                "pipeline[{id}] reveal-only in stop window: reveal_tick={reveal_tick} amount=0",
+                "pipeline[{id}] reveal-only in stop window: reveal_tick={reveal_tick} amount={amount}",
                 id = self.id,
                 reveal_tick = reveal_send_at_tick,
+                amount = pending.collateral_amount,
             ));
             if job_tx.send(reveal_job).await.is_err() {
                 return false;
@@ -338,6 +341,7 @@ impl Pipeline {
         self.pending = Some(PendingCommit {
             reveal_send_at_tick: next_reveal_tick,
             revealed_bits: next_bits,
+            collateral_amount: self.config.commit_amount,
         });
         true
     }
@@ -548,8 +552,6 @@ mod tests {
             reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
-            bob_endpoint: "bob".to_string(),
-            grpc_endpoint: "http://127.0.0.1:50051".to_string(),
         }
     }
 
@@ -736,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_shutdown_returns_reveal_job() {
-        // Shutdown returns a pending reveal with amount=0.
+        // Shutdown returns reveal-only with the same collateral and zero commit.
         let config = test_config();
         let balance_state = Arc::new(BalanceState::new());
         balance_state.set_amount(100);
@@ -766,8 +768,9 @@ mod tests {
         let job = reply_rx.await.expect("reply");
         let job = job.expect("shutdown job");
 
-        assert_eq!(job.amount, 0);
+        assert_eq!(job.amount, config.commit_amount);
         assert_eq!(job.tick, 18);
+        assert_eq!(job.input.committed_digest, [0u8; 32]);
 
         handle.abort();
     }

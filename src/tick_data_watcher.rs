@@ -127,9 +127,13 @@ pub(crate) struct ScapiTickDataFetcher {
 impl ScapiTickDataFetcher {
     pub fn new(base_url: String) -> Self {
         Self {
-            rpc: RpcClient::with_base_url(std::borrow::Cow::Owned(base_url)),
+            rpc: RpcClient::with_base_url(std::borrow::Cow::Owned(scapi_query_url(&base_url))),
         }
     }
+}
+
+fn scapi_query_url(base_url: &str) -> String {
+    format!("{}/query/v1", base_url.trim_end_matches('/'))
 }
 
 #[async_trait]
