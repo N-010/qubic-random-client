@@ -241,6 +241,7 @@ impl AppConfig {
         Self::from_cli_and_file(cli, seed_value, file_config)
     }
 
+    #[cfg(test)]
     fn from_cli_inner(cli: Cli, seed_value: String) -> Result<Self, String> {
         Self::from_cli_and_file(cli, seed_value, FileConfig::default())
     }
