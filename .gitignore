@@ -1,5 +1,7 @@
 /target
 
+/secrets/random_seed
+
 /.idea
 
 # Codex

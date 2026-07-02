@@ -416,6 +416,7 @@ mod tests {
             reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
+            legacy_zero_commit_on_stop: false,
         };
 
         let shutdown_notify = notify.clone();

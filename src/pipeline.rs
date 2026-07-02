@@ -16,24 +16,6 @@ use crate::protocol::RevealAndCommitInput;
 use crate::ticks::TickInfo;
 use crate::transport::ScTransport;
 
-#[cfg(test)]
-static RESCHEDULE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-fn record_reschedule() {
-    RESCHEDULE_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-fn reschedule_count() -> usize {
-    RESCHEDULE_COUNT.load(Ordering::Relaxed)
-}
-
-#[cfg(test)]
-fn reset_reschedule_count() {
-    RESCHEDULE_COUNT.store(0, Ordering::Relaxed);
-}
-
 #[derive(Debug)]
 pub enum PipelineEvent {
     Shutdown {
@@ -102,33 +84,60 @@ impl Pipeline {
         u32::try_from(self.id).unwrap_or(u32::MAX)
     }
 
-    fn build_shutdown_job(&mut self) -> Option<RevealCommitJob> {
-        self.pending.take().map(|pending| {
-            let current_tick = self
-                .tick_info
-                .tick
-                .saturating_add(self.config.reveal_delay_ticks)
-                .saturating_add(self.id_tick_offset());
-            let reveal_tick = current_tick.max(pending.reveal_send_at_tick);
-            let reveal_input = RevealAndCommitInput {
-                revealed_bits: pending.revealed_bits,
-                committed_digest: [0u8; 32],
-            };
-            let reveal_job = RevealCommitJob {
-                input: reveal_input,
-                amount: pending.collateral_amount,
-                tick: reveal_tick,
-                kind: RevealCommitKind::Reveal,
-                pipeline_id: self.id,
-            };
+    fn next_stream_tick(&self, after_tick: u32) -> u32 {
+        let first_candidate = after_tick
+            .saturating_add(self.config.reveal_delay_ticks)
+            .saturating_add(self.config.reveal_window_ticks);
+        let stream = self.id_tick_offset() % 3;
+        let adjustment = (stream + 3 - first_candidate % 3) % 3;
+        first_candidate.saturating_add(adjustment)
+    }
 
-            console::log_info(format!(
-                "Worker {worker} is sending the last pending reveal before shutdown for tick {reveal_tick} (amount {amount})",
+    fn build_shutdown_job(&mut self) -> Option<RevealCommitJob> {
+        let pending = self.pending.take()?;
+        if self.tick_info.tick >= pending.reveal_send_at_tick {
+            console::record_reveal_result(false);
+            console::log_warn(format!(
+                "Worker {worker} skipped an expired reveal for tick {reveal_tick} during shutdown",
                 worker = self.id + 1,
-                amount = pending.collateral_amount,
+                reveal_tick = pending.reveal_send_at_tick,
             ));
-            reveal_job
-        })
+            return None;
+        }
+
+        let reveal_tick = pending.reveal_send_at_tick;
+        Some(self.build_final_job(pending, reveal_tick, "before shutdown"))
+    }
+
+    fn build_final_job(
+        &self,
+        pending: PendingCommit,
+        reveal_tick: u32,
+        reason: &str,
+    ) -> RevealCommitJob {
+        let input = build_final_input(
+            pending.revealed_bits,
+            self.config.legacy_zero_commit_on_stop,
+            fill_secure_bits,
+        );
+        let mode = if self.config.legacy_zero_commit_on_stop {
+            "legacy zero-commit mode"
+        } else {
+            "modern non-zero commit mode"
+        };
+        console::log_info(format!(
+            "Worker {worker} is sending the last pending reveal {reason} for tick {reveal_tick} using {mode} (amount {amount})",
+            worker = self.id + 1,
+            amount = pending.collateral_amount,
+        ));
+
+        RevealCommitJob {
+            input,
+            amount: pending.collateral_amount,
+            tick: reveal_tick,
+            kind: RevealCommitKind::Reveal,
+            pipeline_id: self.id,
+        }
     }
 
     fn is_outdated_tick(&self, tick_info: &TickInfo) -> bool {
@@ -198,11 +207,7 @@ impl Pipeline {
         job_tx: &mpsc::Sender<RevealCommitJob>,
     ) -> bool {
         let reveal_delay = self.config.reveal_delay_ticks;
-        let scheduled_tick = tick_info
-            .tick
-            .saturating_add(reveal_delay)
-            .saturating_add(self.id_tick_offset())
-            .saturating_add(self.config.reveal_window_ticks);
+        let scheduled_tick = self.next_stream_tick(tick_info.tick);
         let mut revealed_bits = [0u8; 512];
         fill_secure_bits(&mut revealed_bits);
         let committed_digest = commit_digest(&revealed_bits);
@@ -242,7 +247,6 @@ impl Pipeline {
         tick_info: &TickInfo,
         job_tx: &mpsc::Sender<RevealCommitJob>,
     ) -> bool {
-        let id_tick_offset = self.id_tick_offset();
         let reveal_delay = self.config.reveal_delay_ticks;
         let reveal_send_guard = self.config.reveal_window_ticks;
         let Some(pending) = self.pending.as_ref() else {
@@ -252,51 +256,28 @@ impl Pipeline {
         let revealed_bits = pending.revealed_bits;
         let in_stop_window =
             is_epoch_stop_window(Utc::now(), self.config.epoch_stop_lead_time_secs);
-        if in_stop_window {
-            let reveal_job = RevealCommitJob {
-                input: RevealAndCommitInput {
-                    revealed_bits,
-                    committed_digest: [0u8; 32],
-                },
-                amount: pending.collateral_amount,
-                tick: reveal_send_at_tick,
-                kind: RevealCommitKind::Reveal,
-                pipeline_id: self.id,
-            };
-
-            console::log_info(format!(
-                "Worker {worker} is revealing the last commit for tick {tick} before epoch end (amount {amount})",
+        if tick_info.tick >= reveal_send_at_tick {
+            self.pending.take();
+            console::record_reveal_result(false);
+            console::log_warn(format!(
+                "Worker {worker} missed reveal tick {old_reveal_tick}; the old reveal was discarded",
                 worker = self.id + 1,
-                tick = reveal_send_at_tick,
-                amount = pending.collateral_amount,
+                old_reveal_tick = reveal_send_at_tick,
             ));
+
+            if in_stop_window || !self.has_sufficient_balance() {
+                return true;
+            }
+            return self.emit_commit_only_job(tick_info, job_tx).await;
+        }
+
+        if in_stop_window {
+            let pending = self.pending.take().expect("pending commit checked above");
+            let reveal_job = self.build_final_job(pending, reveal_send_at_tick, "before epoch end");
             if job_tx.send(reveal_job).await.is_err() {
                 return false;
             }
 
-            self.pending = None;
-            return true;
-        }
-
-        if tick_info.tick >= reveal_send_at_tick {
-            let rescheduled = tick_info
-                .tick
-                .saturating_add(reveal_delay)
-                .saturating_add(id_tick_offset)
-                .saturating_add(reveal_send_guard);
-
-            console::record_reveal_result(false);
-            #[cfg(test)]
-            record_reschedule();
-            console::log_warn(format!(
-                "Worker {worker} missed the reveal window, rescheduled from tick {old_reveal_tick} to tick {new_reveal_tick}",
-                worker = self.id + 1,
-                old_reveal_tick = reveal_send_at_tick,
-                new_reveal_tick = rescheduled
-            ));
-            if let Some(pending) = self.pending.as_mut() {
-                pending.reveal_send_at_tick = rescheduled;
-            }
             return true;
         }
 
@@ -382,12 +363,11 @@ impl Pipeline {
             return true;
         }
 
-        if !self.has_sufficient_balance() {
-            return true;
-        }
-
         self.tick_info = tick_info.clone();
         if self.pending.is_none() {
+            if !self.has_sufficient_balance() {
+                return true;
+            }
             return self.emit_commit_only_job(&tick_info, job_tx).await;
         }
 
@@ -423,6 +403,25 @@ impl Pipeline {
                 }
             }
         }
+    }
+}
+
+fn build_final_input(
+    revealed_bits: [u8; 512],
+    legacy_zero_commit: bool,
+    fill_bits: impl FnOnce(&mut [u8; 512]),
+) -> RevealAndCommitInput {
+    let committed_digest = if legacy_zero_commit {
+        [0u8; 32]
+    } else {
+        let mut next_bits = [0u8; 512];
+        fill_bits(&mut next_bits);
+        commit_digest(&next_bits)
+    };
+
+    RevealAndCommitInput {
+        revealed_bits,
+        committed_digest,
     }
 }
 
@@ -509,8 +508,8 @@ fn is_broadcast_error(err: &crate::transport::TransportError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Pipeline, PipelineEvent, RevealCommitJob, RevealCommitKind, current_tick_store,
-        is_epoch_stop_window, reschedule_count, reset_reschedule_count, run_job_dispatcher,
+        Pipeline, PipelineEvent, RevealCommitJob, RevealCommitKind, build_final_input,
+        current_tick_store, is_epoch_stop_window, run_job_dispatcher,
     };
     use crate::balance::BalanceState;
     use crate::config::{Backend, Config};
@@ -552,6 +551,7 @@ mod tests {
             reveal_check_delay_ticks: 1,
             epoch_stop_lead_time_secs: 600,
             epoch_resume_delay_ticks: 0,
+            legacy_zero_commit_on_stop: false,
         }
     }
 
@@ -609,6 +609,31 @@ mod tests {
         assert!(is_epoch_stop_window(in_window, 600));
         assert!(!is_epoch_stop_window(out_window, 600));
         assert!(!is_epoch_stop_window(wrong_day, 600));
+    }
+
+    #[test]
+    fn modern_final_input_commits_generated_bits() {
+        let revealed_bits = [7u8; 512];
+        let generated_bits = [9u8; 512];
+        let input = build_final_input(revealed_bits, false, |out| {
+            *out = generated_bits;
+        });
+
+        assert_eq!(input.revealed_bits, revealed_bits);
+        assert_eq!(
+            input.committed_digest,
+            crate::entropy::commit_digest(&generated_bits)
+        );
+    }
+
+    #[test]
+    fn legacy_final_input_does_not_generate_a_commit() {
+        let input = build_final_input([7u8; 512], true, |_| {
+            panic!("legacy mode must not generate new bits");
+        });
+
+        assert_eq!(input.revealed_bits, [7u8; 512]);
+        assert_eq!(input.committed_digest, [0u8; 32]);
     }
 
     #[tokio::test]
@@ -738,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_shutdown_returns_reveal_job() {
-        // Shutdown returns reveal-only with the same collateral and zero commit.
+        // Modern shutdown reveals the pending value and leaves a new commit behind.
         let config = test_config();
         let balance_state = Arc::new(BalanceState::new());
         balance_state.set_amount(100);
@@ -770,9 +795,79 @@ mod tests {
 
         assert_eq!(job.amount, config.commit_amount);
         assert_eq!(job.tick, 18);
+        assert_eq!(job.pipeline_id, 0);
+        assert!(job.input.revealed_bits.iter().any(|byte| *byte != 0));
+        assert!(job.input.committed_digest.iter().any(|byte| *byte != 0));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipeline_shutdown_legacy_mode_uses_zero_commit() {
+        let mut config = test_config();
+        config.legacy_zero_commit_on_stop = true;
+        let balance_state = Arc::new(BalanceState::new());
+        balance_state.set_amount(100);
+        let pipeline = Pipeline::new(config.clone(), 2, balance_state);
+        let (tick_tx, _) = broadcast::channel(4);
+        let (pipeline_tx, pipeline_rx) = mpsc::channel(4);
+        let (job_tx, mut job_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(pipeline.run(tick_tx.subscribe(), pipeline_rx, job_tx));
+
+        tick_tx
+            .send(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 10,
+                initial_tick: 1,
+            })
+            .expect("send tick");
+        let _ = with_timeout(Duration::from_millis(200), job_rx.recv())
+            .await
+            .expect("commit job");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        pipeline_tx
+            .send(PipelineEvent::Shutdown { reply: reply_tx })
+            .await
+            .expect("send shutdown");
+        let job = reply_rx.await.expect("reply").expect("shutdown job");
+
+        assert_eq!(job.amount, config.commit_amount);
+        assert_eq!(job.tick, 20);
+        assert_eq!(job.pipeline_id, 2);
+        assert!(job.input.revealed_bits.iter().any(|byte| *byte != 0));
         assert_eq!(job.input.committed_digest, [0u8; 32]);
 
         handle.abort();
+    }
+
+    #[test]
+    fn final_job_builder_preserves_epoch_end_metadata_in_both_modes() {
+        for legacy_zero_commit_on_stop in [false, true] {
+            let mut config = test_config();
+            config.legacy_zero_commit_on_stop = legacy_zero_commit_on_stop;
+            let pipeline = Pipeline::new(config, 4, Arc::new(BalanceState::new()));
+            let revealed_bits = [3u8; 512];
+            let job = pipeline.build_final_job(
+                super::PendingCommit {
+                    reveal_send_at_tick: 90,
+                    revealed_bits,
+                    collateral_amount: 100,
+                },
+                90,
+                "before epoch end",
+            );
+
+            assert_eq!(job.input.revealed_bits, revealed_bits);
+            assert_eq!(job.amount, 100);
+            assert_eq!(job.tick, 90);
+            assert_eq!(job.kind, RevealCommitKind::Reveal);
+            assert_eq!(job.pipeline_id, 4);
+            assert_eq!(
+                job.input.committed_digest == [0u8; 32],
+                legacy_zero_commit_on_stop
+            );
+        }
     }
 
     #[tokio::test]
@@ -910,9 +1005,48 @@ mod tests {
         handle.abort();
     }
 
+    #[test]
+    fn shutdown_skips_expired_reveal() {
+        let mut pipeline = Pipeline::new(test_config(), 0, Arc::new(BalanceState::new()));
+        pipeline.tick_info.tick = 90;
+        pipeline.pending = Some(super::PendingCommit {
+            reveal_send_at_tick: 90,
+            revealed_bits: [3u8; 512],
+            collateral_amount: 100,
+        });
+
+        assert!(pipeline.build_shutdown_job().is_none());
+        assert!(pipeline.pending.is_none());
+    }
+
+    #[test]
+    fn shutdown_preserves_unexpired_reveal_tick() {
+        let mut pipeline = Pipeline::new(test_config(), 0, Arc::new(BalanceState::new()));
+        pipeline.tick_info.tick = 89;
+        pipeline.pending = Some(super::PendingCommit {
+            reveal_send_at_tick: 90,
+            revealed_bits: [3u8; 512],
+            collateral_amount: 100,
+        });
+
+        let job = pipeline.build_shutdown_job().expect("shutdown reveal");
+        assert_eq!(job.tick, 90);
+    }
+
+    #[test]
+    fn pipeline_commit_ticks_use_distinct_streams() {
+        for id in 0..3 {
+            let pipeline = Pipeline::new(test_config(), id, Arc::new(BalanceState::new()));
+            for current_tick in [10, 11, 12, 20] {
+                let scheduled_tick = pipeline.next_stream_tick(current_tick);
+                assert!(scheduled_tick > current_tick);
+                assert_eq!(scheduled_tick % 3, id as u32);
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn pipeline_reschedules_when_reveal_tick_passed() {
-        // If current tick surpasses reveal_send_at_tick, reschedule based on base offset + guard.
+    async fn pipeline_starts_new_commit_when_reveal_tick_is_missed() {
         console::init();
         console::reset_reveal_stats();
         let mut config = test_config();
@@ -946,22 +1080,14 @@ mod tests {
                 initial_tick: 1,
             })
             .expect("send tick");
-        let no_job = timeout(Duration::from_millis(20), job_rx.recv()).await;
-        assert!(no_job.is_err());
-
-        // Rescheduled reveal tick should be 26; send tick within guard window.
-        tick_tx
-            .send(crate::ticks::TickInfo {
-                epoch: 1,
-                tick: 24,
-                initial_tick: 1,
-            })
-            .expect("send tick");
         let job = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
-            .expect("reveal job");
-        assert_eq!(job.tick, 26);
-        assert_eq!(job.kind, RevealCommitKind::Reveal);
+            .expect("replacement commit job");
+        assert_eq!(job.tick, 25);
+        assert_eq!(job.tick % 3, 1);
+        assert_eq!(job.kind, RevealCommitKind::CommitOnly);
+        assert_eq!(job.input.revealed_bits, [0u8; 512]);
+        assert_ne!(job.input.committed_digest, [0u8; 32]);
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = pipeline_tx
@@ -1027,11 +1153,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reschedule_increments_fail_count() {
+    async fn missed_reveal_is_not_enqueued_and_replacement_completes_cycle() {
         console::init();
         let _guard = console::test_stats_guard();
         console::reset_reveal_stats();
-        reset_reschedule_count();
         let mut config = test_config();
         config.reveal_delay_ticks = 3;
         config.reveal_window_ticks = 2;
@@ -1051,29 +1176,44 @@ mod tests {
                 initial_tick: 1,
             })
             .expect("send tick");
-        let _ = with_timeout(Duration::from_millis(200), job_rx.recv())
+        let first_commit = with_timeout(Duration::from_millis(200), job_rx.recv())
             .await
             .expect("commit job");
 
         tick_tx
             .send(crate::ticks::TickInfo {
                 epoch: 1,
-                tick: 20,
+                tick: 18,
                 initial_tick: 1,
             })
             .expect("send tick");
+        let replacement = with_timeout(Duration::from_millis(200), job_rx.recv())
+            .await
+            .expect("replacement commit");
+        assert_eq!(replacement.kind, RevealCommitKind::CommitOnly);
+        assert_eq!(replacement.tick, 24);
+        assert_ne!(replacement.input.committed_digest, [0u8; 32]);
+        assert_ne!(
+            replacement.input.committed_digest,
+            first_commit.input.committed_digest
+        );
 
-        let initial_reschedule = reschedule_count();
-        with_timeout(Duration::from_millis(200), async {
-            loop {
-                let reschedules = reschedule_count();
-                if reschedules >= initial_reschedule.saturating_add(1) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await;
+        tick_tx
+            .send(crate::ticks::TickInfo {
+                epoch: 1,
+                tick: 25,
+                initial_tick: 1,
+            })
+            .expect("send tick");
+        let reveal = with_timeout(Duration::from_millis(200), job_rx.recv())
+            .await
+            .expect("replacement reveal");
+        assert_eq!(reveal.kind, RevealCommitKind::Reveal);
+        assert_eq!(reveal.tick, 27);
+        assert_eq!(
+            crate::entropy::commit_digest(&reveal.input.revealed_bits),
+            replacement.input.committed_digest
+        );
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         let _ = pipeline_tx

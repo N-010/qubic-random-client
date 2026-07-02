@@ -3,10 +3,12 @@ use std::io::Write as _;
 
 use atty::Stream;
 use clap::{Parser, ValueEnum};
+use serde::Deserialize;
 use zeroize::Zeroize;
 
 const DEFAULT_SENDERS: usize = 3;
 const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
+const MAX_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
 const DEFAULT_RUNTIME_THREADS: usize = 0;
 const DEFAULT_COMMIT_AMOUNT: u64 = 10_000;
 const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
@@ -90,7 +92,8 @@ pub struct Cli {
         long = "pipelines",
         value_name = "N",
         default_value_t = DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT,
-        help = "Number of parallel commit/reveal pipelines",
+        value_parser = parse_pipeline_count,
+        help = "Number of parallel commit/reveal pipelines; maximum 3",
         help_heading = "Throughput"
     )]
     pub pipeline_count: usize,
@@ -221,19 +224,36 @@ pub struct Config {
     pub reveal_check_delay_ticks: u32,
     pub epoch_stop_lead_time_secs: u64,
     pub epoch_resume_delay_ticks: u32,
+    pub legacy_zero_commit_on_stop: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FileConfig {
+    legacy_zero_commit_on_stop: bool,
 }
 
 impl AppConfig {
     pub fn from_cli() -> Result<Self, String> {
         let mut cli = Cli::parse();
+        let file_config = load_file_config(std::path::Path::new("config.toml"))?;
         let seed_value = resolve_seed(cli.seed.take(), read_seed_from_stdin)?;
-        Self::from_cli_inner(cli, seed_value)
+        Self::from_cli_and_file(cli, seed_value, file_config)
     }
 
     fn from_cli_inner(cli: Cli, seed_value: String) -> Result<Self, String> {
+        Self::from_cli_and_file(cli, seed_value, FileConfig::default())
+    }
+
+    fn from_cli_and_file(
+        cli: Cli,
+        seed_value: String,
+        file_config: FileConfig,
+    ) -> Result<Self, String> {
         let seed = Seed::new(seed_value)?;
         validate_commit_amount(cli.commit_amount)?;
         validate_reveal_delay_ticks(cli.reveal_delay_ticks)?;
+        validate_pipeline_count(cli.pipeline_count)?;
         let max_inflight_sends = if cli.max_inflight_sends == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -269,9 +289,22 @@ impl AppConfig {
                 reveal_check_delay_ticks: cli.reveal_check_delay_ticks,
                 epoch_stop_lead_time_secs: cli.epoch_stop_lead_time_secs,
                 epoch_resume_delay_ticks: cli.epoch_resume_delay_ticks,
+                legacy_zero_commit_on_stop: file_config.legacy_zero_commit_on_stop,
             },
         })
     }
+}
+
+fn load_file_config(path: &std::path::Path) -> Result<FileConfig, String> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(FileConfig::default()),
+        Err(err) => {
+            return Err(format!("failed to read {}: {err}", path.display()));
+        }
+    };
+
+    toml::from_str(&contents).map_err(|err| format!("invalid {}: {err}", path.display()))
 }
 
 fn resolve_endpoint(backend: Backend, endpoint: Option<String>) -> String {
@@ -338,6 +371,22 @@ fn validate_reveal_delay_ticks(reveal_delay_ticks: u32) -> Result<(), String> {
     }
 
     Err("--reveal-after must be a positive multiple of 3".to_string())
+}
+
+fn validate_pipeline_count(pipeline_count: usize) -> Result<(), String> {
+    if pipeline_count <= MAX_COMMIT_REVEAL_PIPELINE_COUNT {
+        return Ok(());
+    }
+
+    Err("--pipelines must not be greater than 3".to_string())
+}
+
+fn parse_pipeline_count(value: &str) -> Result<usize, String> {
+    let pipeline_count = value
+        .parse::<usize>()
+        .map_err(|_| "--pipelines must be a non-negative integer".to_string())?;
+    validate_pipeline_count(pipeline_count)?;
+    Ok(pipeline_count)
 }
 
 fn resolve_seed<F>(seed: Option<String>, read_seed: F) -> Result<String, String>
@@ -463,10 +512,24 @@ fn unlock_bytes(_bytes: &[u8]) {}
 mod tests {
     use super::{
         AppConfig, Backend, Cli, DEFAULT_BOB_ENDPOINT, DEFAULT_GRPC_ENDPOINT, DEFAULT_RPC_ENDPOINT,
-        Seed, normalize_rpc_endpoint, read_seed_from_reader, resolve_endpoint, resolve_seed,
-        validate_commit_amount, validate_reveal_delay_ticks, validate_seed,
+        Seed, load_file_config, normalize_rpc_endpoint, read_seed_from_reader, resolve_endpoint,
+        resolve_seed, validate_commit_amount, validate_pipeline_count, validate_reveal_delay_ticks,
+        validate_seed,
     };
+    use clap::Parser;
     use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_config_path() -> PathBuf {
+        let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "random-client-config-{}-{id}.toml",
+            std::process::id()
+        ))
+    }
 
     fn test_cli() -> Cli {
         Cli {
@@ -581,6 +644,41 @@ mod tests {
     }
 
     #[test]
+    fn validate_pipeline_count_accepts_zero_through_three() {
+        for pipeline_count in 0..=3 {
+            assert!(validate_pipeline_count(pipeline_count).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_pipeline_count_rejects_values_greater_than_three() {
+        for pipeline_count in [4, 5, usize::MAX] {
+            let err = validate_pipeline_count(pipeline_count).expect_err("expected error");
+            assert_eq!(err, "--pipelines must not be greater than 3");
+        }
+    }
+
+    #[test]
+    fn cli_accepts_one_through_three_pipelines() {
+        for pipeline_count in 1..=3 {
+            let value = pipeline_count.to_string();
+            let cli = Cli::try_parse_from(["random-client", "--pipelines", &value])
+                .expect("valid pipeline count");
+            assert_eq!(cli.pipeline_count, pipeline_count);
+        }
+    }
+
+    #[test]
+    fn cli_rejects_more_than_three_pipelines() {
+        let err = Cli::try_parse_from(["random-client", "--pipelines", "4"])
+            .expect_err("invalid pipeline count");
+        assert!(
+            err.to_string()
+                .contains("--pipelines must not be greater than 3")
+        );
+    }
+
+    #[test]
     fn from_cli_inner_auto_threads_and_max_inflight_sends() {
         // Zero values are replaced by available_parallelism.
         let mut cli = test_cli();
@@ -642,6 +740,14 @@ mod tests {
     }
 
     #[test]
+    fn from_cli_inner_rejects_too_many_pipelines() {
+        let mut cli = test_cli();
+        cli.pipeline_count = 4;
+        let err = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect_err("expected err");
+        assert_eq!(err, "--pipelines must not be greater than 3");
+    }
+
+    #[test]
     fn from_cli_inner_uses_grpc_custom_endpoint() {
         let mut cli = test_cli();
         cli.backend = Backend::QlnGrpc;
@@ -666,5 +772,34 @@ mod tests {
         let seed_value = "a".repeat(55);
         let seed = Seed::new(seed_value.clone()).expect("seed");
         assert_eq!(seed.expose(), seed_value);
+    }
+
+    #[test]
+    fn missing_file_config_uses_modern_default() {
+        let path = temp_config_path();
+        let config = load_file_config(&path).expect("missing config uses defaults");
+        assert!(!config.legacy_zero_commit_on_stop);
+    }
+
+    #[test]
+    fn file_config_loads_explicit_boolean_values() {
+        for value in [false, true] {
+            let path = temp_config_path();
+            std::fs::write(&path, format!("legacy_zero_commit_on_stop = {value}\n"))
+                .expect("write config");
+            let config = load_file_config(&path).expect("load config");
+            std::fs::remove_file(path).expect("remove config");
+            assert_eq!(config.legacy_zero_commit_on_stop, value);
+        }
+    }
+
+    #[test]
+    fn invalid_file_config_is_rejected_with_path() {
+        let path = temp_config_path();
+        std::fs::write(&path, "legacy_zero_commit_on_stop = maybe\n").expect("write config");
+        let err = load_file_config(&path).expect_err("invalid config");
+        std::fs::remove_file(&path).expect("remove config");
+        assert!(err.contains("invalid"));
+        assert!(err.contains(path.to_string_lossy().as_ref()));
     }
 }
