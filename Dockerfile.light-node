@@ -7,7 +7,7 @@ RUN apt-get update \
 WORKDIR /build
 
 RUN curl --fail --location --silent --show-error \
-        "https://github.com/N-010/qubic-random-client-qubic-light-node/archive/cfca8149282d3cb0c83ae4f44ce1aefabf3ae1ea.tar.gz" \
+        "https://github.com/N-010/qubic-random-client-qubic-light-node/archive/e2a109c4a40468024b8dcb0e30a5e0c913ab688c.tar.gz" \
         --output /tmp/light-node.tar.gz \
     && tar --extract --gzip --file /tmp/light-node.tar.gz --strip-components=1 \
     && rm /tmp/light-node.tar.gz \
