@@ -1,0 +1,29 @@
+FROM rust:1-bookworm AS builder
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN curl --fail --location --silent --show-error \
+        "https://github.com/N-010/qubic-random-client-qubic-light-node/archive/cfca8149282d3cb0c83ae4f44ce1aefabf3ae1ea.tar.gz" \
+        --output /tmp/light-node.tar.gz \
+    && tar --extract --gzip --file /tmp/light-node.tar.gz --strip-components=1 \
+    && rm /tmp/light-node.tar.gz \
+    && cargo build --release --locked
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/QubicLightNode /usr/local/bin/QubicLightNode
+
+USER 65532:65532
+WORKDIR /app
+
+EXPOSE 21841/tcp 50051/tcp
+
+ENTRYPOINT ["/usr/local/bin/QubicLightNode"]

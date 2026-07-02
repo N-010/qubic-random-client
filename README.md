@@ -32,9 +32,28 @@ While it is running, the program:
 - checks your balance,
 - pauses itself if balance is too low,
 - avoids sending too close to epoch end,
-- tries to send the last pending reveal before shutdown.
+- sends the last pending reveal before shutdown only if its target tick is still ahead.
 
 You do not need to manage each commit and reveal manually.
+
+## Stop Behavior Configuration
+
+The optional `config.toml` file is read from the current working directory. If
+the file is absent, the default behavior is equivalent to:
+
+```toml
+legacy_zero_commit_on_stop = false
+```
+
+With the default `false` value, the final transaction before shutdown or epoch
+end reveals the pending value and includes a new non-zero commit. That commit
+intentionally remains unrevealed because the pipeline then stops. Set the value
+to `true` only when compatibility with the previous behavior is required; the
+final transaction will then reveal the pending value with an all-zero commit.
+An already expired reveal is skipped instead of being moved to a later tick.
+
+An unreadable file or invalid TOML prevents the program from starting. There is
+no command-line override for this setting.
 
 ## What You Need Before Starting
 
@@ -60,6 +79,43 @@ After the build finishes, the executable file will be here:
 
 - `target/release/RandomCient` on Linux/macOS
 - `target/release/RandomCient.exe` on Windows
+
+## Run With Docker Compose
+
+Docker Compose builds and starts both the Random Client and its pinned
+QubicLightNode dependency. Only the Qubic peer port `21841/tcp` is published to
+the host; the gRPC API remains available only inside the Compose network.
+
+Create the required seed file. It must contain exactly 55 lowercase English
+letters and should not have a trailing newline:
+
+```bash
+mkdir -p secrets
+printf '%s' '<your-55-char-seed>' > secrets/random_seed
+```
+
+On PowerShell, use:
+
+```powershell
+New-Item -ItemType Directory -Force secrets | Out-Null
+Set-Content -NoNewline '<your-55-char-seed>' secrets/random_seed
+```
+
+Build and start both services:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+The seed is mounted as a Compose secret and passed to the client through stdin;
+it is not stored in an image, environment variable, or process argument. View
+logs and stop the services with:
+
+```bash
+docker compose logs -f
+docker compose down
+```
 
 ## First Start
 
@@ -148,7 +204,7 @@ Most users only need these settings:
 - `--collateral <AMOUNT>`
   The amount attached to each send.
 - `--pipelines <N>`
-  How many parallel work chains to run.
+  How many parallel work chains to run (maximum `3`).
 - `--senders <N>`
   How many transactions may be sent at the same time.
 
@@ -159,7 +215,7 @@ Most users only need these settings:
   Allowed values are only:
   `1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000`.
 - `--pipelines`
-  More pipelines means more parallel commit/reveal chains.
+  More pipelines means more parallel commit/reveal chains. The maximum is `3`.
 - `--senders`
   More senders means more transactions can be sent at the same time.
   `0` means automatic choice.
@@ -247,7 +303,7 @@ cargo run --release -- --seed <your-seed> --collateral 100000
 Use more parallel pipelines:
 
 ```bash
-cargo run --release -- --seed <your-seed> --pipelines 5
+cargo run --release -- --seed <your-seed> --pipelines 3
 ```
 
 ## Full List Of Main Options

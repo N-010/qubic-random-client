@@ -1,0 +1,43 @@
+services:
+  light-node:
+    build:
+      context: .
+      dockerfile: Dockerfile.light-node
+    command:
+      - --grpc-listen
+      - 0.0.0.0:50051
+    ports:
+      - "21841:21841/tcp"
+    expose:
+      - "50051"
+    restart: unless-stopped
+
+  random-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - exec /usr/local/bin/RandomCient "$@" < /run/secrets/random_seed
+      - --
+    command:
+      - --backend
+      - grpc
+      - --endpoint
+      - http://light-node:50051
+      - --pipelines
+      - "3"
+      - --collateral
+      - "1000"
+    secrets:
+      - random_seed
+    depends_on:
+      light-node:
+        condition: service_started
+    stop_grace_period: 2m
+    restart: unless-stopped
+
+secrets:
+  random_seed:
+    environment: RANDOM_SEED
