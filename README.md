@@ -86,31 +86,25 @@ Docker Compose builds and starts both the Random Client and its pinned
 QubicLightNode dependency. Only the Qubic peer port `21841/tcp` is published to
 the host; the gRPC API remains available only inside the Compose network.
 
-Create the required seed file. It must contain exactly 55 lowercase English
-letters and should not have a trailing newline:
+Pass the seed through the `RANDOM_SEED` environment variable when starting the
+services. It must contain exactly 55 lowercase English letters:
 
 ```bash
-mkdir -p secrets
-printf '%s' '<your-55-char-seed>' > secrets/random_seed
+RANDOM_SEED='<your-55-char-seed>' docker compose up --build -d
 ```
 
 On PowerShell, use:
 
 ```powershell
-New-Item -ItemType Directory -Force secrets | Out-Null
-Set-Content -NoNewline '<your-55-char-seed>' secrets/random_seed
+$env:RANDOM_SEED = '<your-55-char-seed>'
+docker compose up --build -d
+Remove-Item Env:RANDOM_SEED
 ```
 
-Build and start both services:
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-The seed is mounted as a Compose secret and passed to the client through stdin;
-it is not stored in an image, environment variable, or process argument. View
-logs and stop the services with:
+Compose creates the `random_seed` secret from `RANDOM_SEED` and passes it to the
+client through stdin. The seed is not stored in a file in the repository, baked
+into an image, or exposed as a container environment variable or process
+argument. View logs and stop the services with:
 
 ```bash
 docker compose logs -f
