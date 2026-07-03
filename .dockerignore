@@ -5,3 +5,5 @@
 .agents
 target
 *.zip
+*.ps1
+
