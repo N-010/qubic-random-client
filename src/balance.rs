@@ -41,18 +41,23 @@ pub async fn run_balance_watcher(
     state: Arc<BalanceState>,
 ) {
     loop {
-        match client.get_balances(&identity).await {
-            Ok(entries) => {
-                let (line, total) = format_balances(&entries);
-                console::set_balance_line(line);
-                state.set_amount(total);
-            }
-            Err(err) => {
-                console::log_warn(format!("Could not refresh the balance: {err}"));
-                state.set_amount(0);
-            }
-        }
+        refresh_balance(client.as_ref(), &identity, state.as_ref()).await;
         sleep(interval).await;
+    }
+}
+
+async fn refresh_balance(client: &dyn ScapiClient, identity: &str, state: &BalanceState) {
+    match client.get_balances(identity).await {
+        Ok(entries) => {
+            let (line, total) = format_balances(&entries);
+            console::set_balance_line(line);
+            state.set_amount(total);
+        }
+        Err(err) => {
+            console::log_warn(format!(
+                "Could not refresh the balance: {err}; using the last known balance"
+            ));
+        }
     }
 }
 
@@ -74,7 +79,9 @@ fn format_balances(entries: &[BalanceEntry]) -> (String, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BalanceEntry, BalanceState, format_balances, run_balance_watcher};
+    use super::{
+        BalanceEntry, BalanceState, format_balances, refresh_balance, run_balance_watcher,
+    };
     use crate::transport::{ScapiClient, TransportError};
     use async_trait::async_trait;
     use std::collections::VecDeque;
@@ -153,27 +160,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn balance_watcher_handles_errors() {
-        // Errors reset the total to 0.
+    async fn balance_refresh_keeps_last_known_balance_after_error() {
         let client = Arc::new(MockClient::new(Err(TransportError {
             message: "boom".to_string(),
         })));
+        client.push_balances(Ok(vec![BalanceEntry {
+            asset: "AAA".to_string(),
+            amount: 100,
+        }]));
         client.push_balances(Err(TransportError {
             message: "boom".to_string(),
         }));
         let state = Arc::new(BalanceState::new());
-        state.set_amount(99);
 
-        let handle = tokio::spawn(run_balance_watcher(
-            client,
-            "id".to_string(),
-            Duration::from_millis(50),
-            state.clone(),
-        ));
+        refresh_balance(client.as_ref(), "id", state.as_ref()).await;
+        assert_eq!(state.amount(), 100);
 
-        sleep(Duration::from_millis(20)).await;
+        refresh_balance(client.as_ref(), "id", state.as_ref()).await;
+        assert_eq!(state.amount(), 100);
+    }
+
+    #[tokio::test]
+    async fn balance_refresh_applies_successful_zero_balance() {
+        let client = Arc::new(MockClient::new(Ok(Vec::new())));
+        client.push_balances(Ok(vec![BalanceEntry {
+            asset: "AAA".to_string(),
+            amount: 100,
+        }]));
+        client.push_balances(Ok(vec![BalanceEntry {
+            asset: "AAA".to_string(),
+            amount: 0,
+        }]));
+        let state = Arc::new(BalanceState::new());
+
+        refresh_balance(client.as_ref(), "id", state.as_ref()).await;
+        assert_eq!(state.amount(), 100);
+
+        refresh_balance(client.as_ref(), "id", state.as_ref()).await;
         assert_eq!(state.amount(), 0);
-        handle.abort();
     }
 
     #[tokio::test]

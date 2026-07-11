@@ -23,13 +23,14 @@ services:
       - --
     command:
       - --backend
-      - grpc
-      - --endpoint
-      - http://light-node:50051
+      - rpc
+#      - grpc
+#      - --endpoint
+#      - http://light-node:50051
       - --pipelines
       - "3"
       - --collateral
-      - "1000"
+      - "1"
     secrets:
       - random_seed
     depends_on:

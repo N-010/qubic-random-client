@@ -111,6 +111,58 @@ docker compose logs -f
 docker compose down
 ```
 
+### Run Multiple Clients With Different Seeds
+
+Start one shared QubicLightNode, then run one Random Client container for each
+seed:
+
+```powershell
+docker compose up --build -d light-node
+docker compose build random-client
+
+$seeds = @(
+    '<first-55-char-seed>'
+    '<second-55-char-seed>'
+    '<third-55-char-seed>'
+)
+
+try {
+    for ($i = 0; $i -lt $seeds.Count; $i++) {
+        $env:RANDOM_SEED = $seeds[$i]
+        docker compose run -d --no-deps `
+            --name "random-client-$($i + 1)" `
+            random-client
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to start random-client-$($i + 1)"
+        }
+    }
+}
+finally {
+    Remove-Item Env:RANDOM_SEED -ErrorAction SilentlyContinue
+}
+```
+
+Every seed must contain exactly 55 lowercase letters (`a-z`). The configured
+`--pipelines 3` option applies to every client, so `N` clients run `N x 3`
+pipelines in total. No changes to `compose.yaml` are required.
+
+List the client containers and follow one client's logs:
+
+```powershell
+docker ps --filter "name=random-client-"
+docker logs -f random-client-1
+```
+
+Stop and remove the client containers before taking down the shared service:
+
+```powershell
+$seeds.Count..1 | ForEach-Object {
+    docker rm -f "random-client-$_"
+}
+docker compose down
+```
+
 ## First Start
 
 The easiest launch command is:
