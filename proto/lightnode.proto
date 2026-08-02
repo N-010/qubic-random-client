@@ -5,7 +5,8 @@ package lightnode;
 service LightNode {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
   rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
-  rpc GetTickTransactions(GetTickTransactionsRequest) returns (GetTickTransactionsResponse);
+  rpc StreamTickTransactions(GetTickTransactionsRequest) returns (stream Transaction);
+  rpc QueryContractFunction(QueryContractFunctionRequest) returns (QueryContractFunctionResponse);
   rpc BroadcastTransaction(BroadcastTransactionRequest) returns (BroadcastTransactionResponse);
 }
 
@@ -14,6 +15,7 @@ message GetStatusRequest {}
 message TickStatus {
   uint32 epoch = 1;
   uint32 tick = 2;
+  // The quorum vote format does not provide initial_tick or tick_duration_ms.
   uint32 initial_tick = 3;
   uint32 tick_duration_ms = 4;
   uint32 aligned_votes = 5;
@@ -67,11 +69,17 @@ message Transaction {
   string signature_hex = 8;
 }
 
-message GetTickTransactionsResponse {
+message QueryContractFunctionRequest {
+  uint32 contract_index = 1;
+  uint32 input_type = 2;
+  bytes input = 3;
+}
+
+message QueryContractFunctionResponse {
   bool ok = 1;
-  uint32 tick = 2;
-  repeated Transaction transactions = 3;
-  string error = 4;
+  // A successful Core response is non-empty. Empty output is reported as an error.
+  bytes output = 2;
+  string error = 3;
 }
 
 message BroadcastTransactionRequest {
@@ -80,6 +88,7 @@ message BroadcastTransactionRequest {
 
 message BroadcastTransactionResponse {
   bool ok = 1;
+  // Canonical lowercase 60-character Qubic identity derived from K12(tx_bytes).
   string tx_id = 2;
   string error = 3;
 }

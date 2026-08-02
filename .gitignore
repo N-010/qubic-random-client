@@ -4,9 +4,15 @@
 
 /.idea
 
-# Codex
-/.codex*
 
 *.zip
 
 *.ps1
+
+# LLM
+.agents
+.claude
+/.codex*
+.gitnexus
+AGENTS.md
+CLAUDE.md

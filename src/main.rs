@@ -1,30 +1,8 @@
-mod app;
-mod balance;
-mod bob;
-mod config;
-mod console;
-mod entropy;
-mod pipeline;
-mod protocol;
-mod qln;
-mod tick_data_watcher;
-mod ticks;
-mod transport;
+use random_client::config::AppConfig;
 
-use app::{AppResult, run};
-use config::AppConfig;
-
-fn main() -> AppResult<()> {
-    let config = AppConfig::from_cli().map_err(|err| {
-        eprintln!("Configuration error: {err}");
-        err
-    })?;
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.runtime.worker_threads)
-        .enable_all()
-        .build()?;
-
-    runtime.block_on(run(config))?;
-    Ok(())
+#[tokio::main]
+async fn main() -> random_client::AppResult<()> {
+    let config = AppConfig::from_cli()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    random_client::run(config).await
 }

@@ -89,15 +89,12 @@ pub fn log_warn(message: impl Into<String>) {
     log_with_level("WARN", message.into());
 }
 
-pub async fn shutdown() {}
-
 pub fn shorten_id(value: &str) -> String {
-    if value.len() <= 6 {
-        return value.to_string();
-    }
-
-    let head = &value[..6];
-    head.to_string()
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(6)
+        .collect()
 }
 
 pub fn format_amount(amount: u64) -> String {
@@ -176,6 +173,7 @@ pub fn record_reveal_result(success: bool) {
     }
 }
 
+#[cfg(test)]
 pub fn record_reveal_empty() {
     if let Some(status) = STATUS.get()
         && let Ok(mut status) = status.lock()
@@ -313,6 +311,12 @@ mod tests {
     fn shorten_id_truncates_long_values() {
         // Long IDs are shortened to head...tail.
         assert_eq!(shorten_id("abcdefghijklmnopqrstuvwxyz"), "abcdef");
+    }
+
+    #[test]
+    fn shorten_id_handles_unicode_and_controls() {
+        assert_eq!(shorten_id("aaaaaémore"), "aaaaaé");
+        assert_eq!(shorten_id("abc\n123"), "abc123");
     }
 
     #[test]

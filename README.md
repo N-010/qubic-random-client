@@ -1,381 +1,180 @@
 # Random Client
 
-`Random Client` is a program for the Qubic Random smart contract.
-It works automatically in a loop:
+`random-client` is a Rust provider client for the Qubic Random smart contract.
+It maintains one provider slot in each Random stream and runs the
+`commit -> reveal + commit` cycle continuously.
 
-1. it sends a hidden value,
-2. waits a few ticks,
-3. reveals that value,
-4. prepares the next round.
+The client supports three independent backends:
 
-In simple words, this tool keeps your participation in the Random contract
-running without manual action every few ticks.
+- `rpc` — Qubic HTTP RPC;
+- `bob` — Bob JSON-RPC;
+- `grpc` — the local `QubicLightNode` gRPC API.
 
-## What This Program Is For
+Every backend supplies tick, balance, transaction broadcast, and generic
+smart-contract function queries. The client uses Random's
+`GetProviderStatus` function to verify contract execution; accepting a
+broadcast is not treated as proof that the contract accepted the call.
 
-This README is written for normal users: people who want to build and run the
-program, even if they are not deeply technical.
+## Architecture
 
-If you only need the short version:
+- `config` owns CLI parsing, validation, and protected seed storage.
+- `backend` exposes one transport-neutral interface implemented by RPC, Bob,
+  and QubicLightNode.
+- `contract` owns the exact Random wire layout and its validation.
+- `engine` owns three independent predictive commit/reveal schedulers.
+- `app` only constructs these components and handles process signals.
 
-1. build the program,
-2. prepare your seed,
-3. run it,
-4. leave it working.
-
-## What The Program Does
-
-While it is running, the program:
-
-- watches Qubic ticks,
-- sends transactions at the right moment,
-- checks your balance,
-- pauses itself if balance is too low,
-- avoids sending too close to epoch end,
-- sends the last pending reveal before shutdown only if its target tick is still ahead.
-
-You do not need to manage each commit and reveal manually.
-
-## Stop Behavior Configuration
-
-The optional `config.toml` file is read from the current working directory. If
-the file is absent, the default behavior is equivalent to:
-
-```toml
-legacy_zero_commit_on_stop = false
-```
-
-With the default `false` value, the final transaction before shutdown or epoch
-end reveals the pending value and includes a new non-zero commit. That commit
-intentionally remains unrevealed because the pipeline then stops. Set the value
-to `true` only when compatibility with the previous behavior is required; the
-final transaction will then reveal the pending value with an all-zero commit.
-An already expired reveal is skipped instead of being moved to a later tick.
-
-An unreadable file or invalid TOML prevents the program from starting. There is
-no command-line override for this setting.
-
-## What You Need Before Starting
-
-- Rust installed on your computer.
-- A valid seed.
-  The seed must be exactly `55` lowercase English letters: `a-z`.
-- Access to one backend.
-  Default choices are:
-  - `rpc`: `https://rpc.qubic.org`
-  - `bob`: `http://localhost:40420/qubic`
-  - `grpc`: `http://127.0.0.1:50051`
-- Enough Qubic balance for the collateral amount you want to use.
+SCAPI remains pinned to the existing revision. It is used for wallet/identity
+handling, transaction construction and signing, and the existing RPC and Bob
+clients. Random-specific encoding, status decoding, and scheduling are kept
+outside SCAPI.
 
 ## Build
 
-Run this command in the project folder:
+Rust stable with edition 2024 support is required.
 
 ```bash
-cargo build --release
+cargo build --release --locked
+cargo test --all-targets
 ```
 
-After the build finishes, the executable file will be here:
+The executable is `target/release/random-client`.
 
-- `target/release/RandomCient` on Linux/macOS
-- `target/release/RandomCient.exe` on Windows
-
-## Run With Docker Compose
-
-Docker Compose builds and starts both the Random Client and its pinned
-QubicLightNode dependency. Only the Qubic peer port `21841/tcp` is published to
-the host; the gRPC API remains available only inside the Compose network.
-
-Pass the seed through the `RANDOM_SEED` environment variable when starting the
-services. It must contain exactly 55 lowercase English letters:
+## Run
 
 ```bash
-RANDOM_SEED='<your-55-char-seed>' docker compose up --build -d
+cargo run --release -- --seed <55-letter-seed>
 ```
 
-On PowerShell, use:
+If `--seed` is omitted, it is read from the terminal without echo or from the
+first line of redirected standard input.
 
-```powershell
-$env:RANDOM_SEED = '<your-55-char-seed>'
-docker compose up --build -d
-Remove-Item Env:RANDOM_SEED
-```
-
-Compose creates the `random_seed` secret from `RANDOM_SEED` and passes it to the
-client through stdin. The seed is not stored in a file in the repository, baked
-into an image, or exposed as a container environment variable or process
-argument. View logs and stop the services with:
-
-```bash
-docker compose logs -f
-docker compose down
-```
-
-### Run Multiple Clients With Different Seeds
-
-Start one shared QubicLightNode, then run one Random Client container for each
-seed:
-
-```powershell
-docker compose up --build -d light-node
-docker compose build random-client
-
-$seeds = @(
-    '<first-55-char-seed>'
-    '<second-55-char-seed>'
-    '<third-55-char-seed>'
-)
-
-try {
-    for ($i = 0; $i -lt $seeds.Count; $i++) {
-        $env:RANDOM_SEED = $seeds[$i]
-        docker compose run -d --no-deps `
-            --name "random-client-$($i + 1)" `
-            random-client
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to start random-client-$($i + 1)"
-        }
-    }
-}
-finally {
-    Remove-Item Env:RANDOM_SEED -ErrorAction SilentlyContinue
-}
-```
-
-Every seed must contain exactly 55 lowercase letters (`a-z`). The configured
-`--pipelines 3` option applies to every client, so `N` clients run `N x 3`
-pipelines in total. No changes to `compose.yaml` are required.
-
-List the client containers and follow one client's logs:
-
-```powershell
-docker ps --filter "name=random-client-"
-docker logs -f random-client-1
-```
-
-Stop and remove the client containers before taking down the shared service:
-
-```powershell
-$seeds.Count..1 | ForEach-Object {
-    docker rm -f "random-client-$_"
-}
-docker compose down
-```
-
-## First Start
-
-The easiest launch command is:
-
-```bash
-cargo run --release -- --seed <your-55-char-seed>
-```
-
-If you do not want to put the seed in the command line, run:
-
-```bash
-cargo run --release
-```
-
-The program will ask you to enter the seed.
-
-## Simple Launch Examples
-
-Use the default public RPC:
-
-```bash
-cargo run --release -- --seed <your-seed>
-```
-
-Use Bob:
-
-```bash
-cargo run --release -- \
-  --seed <your-seed> \
-  --backend bob \
-  --endpoint http://localhost:40420/qubic
-```
-
-Use gRPC / QubicLightNode:
-
-```bash
-cargo run --release -- \
-  --seed <your-seed> \
-  --backend grpc \
-  --endpoint http://127.0.0.1:50051
-```
-
-Run the already built executable directly:
-
-```bash
-target/release/RandomCient --seed <your-seed>
-```
-
-On Windows:
-
-```powershell
-target\release\RandomCient.exe --seed <your-seed>
-```
-
-## What You Will See In The Logs
-
-The program prints simple status messages.
-Usually they tell you:
-
-- which backend is being used,
-- current epoch and tick,
-- current balance,
-- whether a commit was prepared,
-- whether a reveal was sent,
-- whether a transaction was accepted,
-- whether the program is waiting because of timing or low balance.
-
-There is also a reveal summary with:
-
-- successful,
-- failed,
-- empty,
-- percentages.
-
-## The Most Important Options
-
-Most users only need these settings:
-
-- `--seed <SEED>`
-  Your private seed. Keep it secret.
-- `--backend <rpc|bob|grpc>`
-  Which connection type to use.
-- `--endpoint <URL>`
-  Custom server address for the selected backend.
-- `--collateral <AMOUNT>`
-  The amount attached to each send.
-- `--pipelines <N>`
-  How many parallel work chains to run (maximum `3`).
-- `--senders <N>`
-  How many transactions may be sent at the same time.
-
-## What The Options Mean In Simple Words
-
-- `--collateral`
-  This is the amount used in commit and reveal transactions.
-  Allowed values are only:
-  `1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000`.
-- `--pipelines`
-  More pipelines means more parallel commit/reveal chains. The maximum is `3`.
-- `--senders`
-  More senders means more transactions can be sent at the same time.
-  `0` means automatic choice.
-- `--reveal-after`
-  How many ticks to wait before reveal.
-  Must be a positive multiple of `3`.
-- `--reveal-guard`
-  Lets the program send a little earlier so it does not miss the target tick.
-- `--tick-poll-ms`
-  How often the program checks for a new tick.
-- `--balance-ms`
-  How often balance is refreshed.
-- `--empty-check-ms`
-  How often old reveal ticks are checked later.
-- `--reveal-verify-after`
-  How many ticks to wait before checking whether reveal data appeared.
-- `--stop-before-epoch-end-secs`
-  How early the program should stop creating new work before epoch end.
-- `--resume-after-epoch-start-ticks`
-  How long to wait after a new epoch starts before working again.
-- `--workers`
-  Number of runtime worker threads.
-  `0` means automatic choice.
-
-## Recommended Starting Point
-
-If you are not sure what to choose, start with defaults and only pass:
-
-- `--seed`
-- optionally `--backend`
-- optionally `--endpoint`
-
-For example:
-
-```bash
-cargo run --release -- --seed <your-seed> --backend rpc
-```
-
-## When It Is Normal For The Program To Wait
-
-Sometimes the program waits on purpose. This is normal.
-
-Typical reasons:
-
-- the balance is lower than the selected collateral amount,
-- it is too early to send reveal,
-- the epoch is close to ending,
-- the program is waiting for the safe start period of a new epoch.
-
-## Common Problems
-
-- `seed from stdin is empty`
-  No seed was provided.
-- `seed must be 55 characters`
-  The seed length is wrong.
-- `seed must contain only a-z characters`
-  The seed contains invalid characters.
-- `--reveal-after must be a positive multiple of 3`
-  The reveal delay value is not allowed.
-- `--collateral must be one of ...`
-  The collateral value is invalid.
-- `VirtualLock failed` or `mlock failed`
-  The operating system refused to lock seed memory.
-
-## Useful Commands
-
-Show help:
-
-```bash
-cargo run --release -- --help
-```
-
-Use automatic sender count:
-
-```bash
-cargo run --release -- --seed <your-seed> --senders 0
-```
-
-Use a larger collateral amount:
-
-```bash
-cargo run --release -- --seed <your-seed> --collateral 100000
-```
-
-Use more parallel pipelines:
-
-```bash
-cargo run --release -- --seed <your-seed> --pipelines 3
-```
-
-## Full List Of Main Options
+Main options:
 
 ```text
---seed <SEED>
---backend <BACKEND>
+--backend <rpc|bob|grpc>
 --endpoint <URL>
 --collateral <AMOUNT>
---senders <N>
---pipelines <N>
---reveal-after <TICKS>
---reveal-guard <TICKS>
---tick-poll-ms <MS>
---balance-ms <MS>
---empty-check-ms <MS>
---reveal-verify-after <TICKS>
---stop-before-epoch-end-secs <SECS>
+--seed <SEED>
+--stop-before-epoch-end-secs <SECONDS>
 --resume-after-epoch-start-ticks <TICKS>
---workers <N>
 ```
 
-## Technical Notes
+Default endpoints:
 
-- The seed is stored in locked memory and cleared on drop.
-- For `rpc`, pass only the base URL.
-  The program adds the SCAPI path parts itself.
-- If you do not pass an option, the program uses built-in defaults.
-- Developer-facing contract details are in `docs/Random.h`.
+- RPC: `https://rpc.qubic.org`
+- Bob: `http://localhost:40420`
+- gRPC: `http://127.0.0.1:50051`
+
+Allowed collateral values are `1`, `10`, `100`, `1000`, `10000`, `100000`,
+`1000000`, `10000000`, `100000000`, and `1000000000`.
+
+The client uses the same collateral tier in streams 0, 1, and 2. A fresh
+three-stream enrollment needs three locked collateral amounts plus one liquid
+collateral amount for subsequent reveal calls.
+
+## Reconciliation, epochs, and shutdown
+
+Commit preimages exist only in process memory. After restart, any provider
+slot already reported by the contract is treated as unmanaged because its
+preimage is unavailable. The client waits for that exact `(stream, tier)` slot
+to disappear before opening a new chain.
+
+The scheduler does not wait for `GetProviderStatus` before building the next
+call. It keeps at most four unfinished future calls through nine ticks ahead;
+calls become eligible for broadcast six ticks before their target. If polling
+skips that exact boundary, the call is still attempted before its target. Each
+queued call owns its exact signed transaction bytes and its own broadcast task,
+so a slow stream or backend request cannot block the other streams. Ambiguous
+transport failures are retried with identical bytes until the original target
+tick.
+
+`GetProviderStatus` is only a consistency check. A `lastUpdateTick` matching
+any target signed by the current local generation confirms that target and
+every earlier call in the generation. Missing, older, delayed, or failed status
+requests do not by themselves pause predictive broadcasts. An empty or lagging
+successful status remains inconclusive through the next complete stream cycle
+(`T + 3`). A response requested at or after that deadline which still contains
+none of the expected targets confirms a predictive-chain break. A newer target
+which was never signed locally makes the slot unmanaged because its current
+preimage is unknown.
+
+After a confirmed or locally detected break, the client stops sending that
+slot's queued work and reconciles with a status request started after the
+break. If status reports a locally accepted target, the client uses the
+preimage committed at that exact target and resumes with a future normal
+`reveal + commit`. If status reports the slot absent, the old work is discarded
+and the client may enroll again using `zero reveal + new nonzero commit`. If
+the slot remains occupied but its outstanding preimage is not known, the slot
+becomes unmanaged and waits for contract eviction.
+
+The client never sends `reveal + zero commit` as post-failure recovery. That
+terminal form is safe only while the local outstanding preimage is still known,
+so it is reserved for proactive epoch drain and graceful process shutdown.
+
+The client starts epoch drain 600 seconds before Wednesday 12:00 UTC by default
+and pauses enrollment for the first 50 ticks after an observed epoch change.
+QubicLightNode does not report the epoch's initial tick, so with that backend
+the first verified tick observed after startup or an epoch change starts the
+same conservative 50-tick pause. The two CLI options above override those
+windows. Old-epoch signed work is discarded when the epoch number changes, and
+status ownership is established again from `Unknown`.
+
+Balance queries are only used when opening vacant slots. A balance failure
+does not delay pending broadcasts or reveals for already managed slots. The
+old tick-data heuristic has been removed because unrelated transactions could
+produce false confirmations.
+
+On Windows, Ctrl+C, Ctrl+Break, console close, logoff, and system shutdown
+start graceful shutdown. On Unix, SIGINT, SIGTERM, SIGQUIT, and SIGHUP do the
+same. No new slots are opened. Each safely managed scheduler freezes its current
+predictive tail and submits a terminal `reveal + zero commit` three ticks later;
+it does not create a replacement first commit. Shutdown succeeds only after all
+prerequisite calls and the terminal call have backend acceptance. An expired
+required call or the 90-second deadline returns an error. A chain already in
+reconciliation is not speculatively drained.
+
+Run only one writer for a given identity and collateral tier. A competing
+client cannot be detected before it changes contract state. Also note that the
+six-tick availability lead exposes reveal material to the selected backend
+before the target tick; use a backend you trust with that early reveal.
+
+## QubicLightNode
+
+The companion source is expected at:
+
+```text
+D:\Work\MySelf\Qubic\QubicLightNode
+```
+
+The client protocol matches QubicLightNode 0.2.0 at commit
+`99d17ddc008e05d094a16a09c93f7f779d012116`. Tick status is unavailable until
+the node has authenticated its computor list and collected a FourQ-verified
+quorum of 451 matching votes. The quorum format does not provide
+`initial_tick` or `tick_duration_ms`; the client conservatively uses the first
+verified tick seen in each epoch and a 1,000 ms duration. Its generic
+`QueryContractFunction` method continues to accept a contract index, function
+input type, and raw input bytes and returns raw output bytes.
+
+`compose.yaml` uses `QubicLightNode` itself as the light-node build context.
+Its `Dockerfile` and `.dockerignore` live in that repository, so unrelated
+sibling projects and local build artifacts are not sent to the Docker daemon:
+
+```bash
+docker compose up --build
+```
+
+The compose client uses `grpc` and connects to `http://light-node:50051`.
+
+## Protocol
+
+[`docs/Random.h`](docs/Random.h) is the source of truth for the smart-contract
+interface. The client currently uses:
+
+- contract index `3`;
+- `RevealAndCommit` procedure `1`;
+- `GetProviderStatus` function `2`.
+
+`GetProviderStatus` input is the provider's raw 32-byte public key. Its output
+is the 680-byte QPI structure described by the header, including alignment
+padding before `lockedCollateral`.

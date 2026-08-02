@@ -1,192 +1,132 @@
 use std::fmt;
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 
-use atty::Stream;
 use clap::{Parser, ValueEnum};
-use serde::Deserialize;
 use zeroize::Zeroize;
 
-const DEFAULT_SENDERS: usize = 3;
-const DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
-const MAX_COMMIT_REVEAL_PIPELINE_COUNT: usize = 3;
-const DEFAULT_RUNTIME_THREADS: usize = 0;
-const DEFAULT_COMMIT_AMOUNT: u64 = 10_000;
-const DEFAULT_REVEAL_DELAY_TICKS: u32 = 3;
-const DEFAULT_REVEAL_SEND_GUARD_TICKS: u32 = 6;
-const DEFAULT_TICK_POLL_INTERVAL_MS: u64 = 1000;
-const DEFAULT_BALANCE_INTERVAL_MS: u64 = 600;
-const DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS: u64 = 600;
-const DEFAULT_TICK_DATA_MIN_DELAY_TICKS: u32 = 10;
-const DEFAULT_EPOCH_STOP_LEAD_TIME_SECS: u64 = 600;
-const DEFAULT_EPOCH_RESUME_DELAY_TICKS: u32 = 50;
 const DEFAULT_RPC_ENDPOINT: &str = "https://rpc.qubic.org";
 const DEFAULT_BOB_ENDPOINT: &str = scapi::bob::DEFAULT_BOB_RPC_ENDPOINT;
 const DEFAULT_GRPC_ENDPOINT: &str = "http://127.0.0.1:50051";
+const DEFAULT_COLLATERAL: u64 = 10_000;
+const DEFAULT_EPOCH_STOP_LEAD_TIME_SECS: u64 = 600;
+const DEFAULT_EPOCH_RESUME_DELAY_TICKS: u32 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Backend {
+pub enum BackendKind {
     Rpc,
     Bob,
-    #[value(name = "grpc", alias = "qln-grpc")]
-    QlnGrpc,
+    #[value(name = "grpc", alias = "qln")]
+    Grpc,
 }
 
-impl Backend {
+impl BackendKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rpc => "rpc",
+            Self::Bob => "bob",
+            Self::Grpc => "grpc",
+        }
+    }
+
     fn default_endpoint(self) -> &'static str {
         match self {
             Self::Rpc => DEFAULT_RPC_ENDPOINT,
             Self::Bob => DEFAULT_BOB_ENDPOINT,
-            Self::QlnGrpc => DEFAULT_GRPC_ENDPOINT,
+            Self::Grpc => DEFAULT_GRPC_ENDPOINT,
         }
     }
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "random-client", version, about = "Random SC client")]
-pub struct Cli {
+#[command(
+    name = "random-client",
+    version,
+    about = "Qubic Random provider client"
+)]
+struct Cli {
     #[arg(
         long,
         value_name = "SEED",
-        help = "Seed. If omitted, reads from stdin/TTY",
-        help_heading = "Input"
+        help = "Seed; reads securely from stdin if omitted"
     )]
-    pub seed: Option<String>,
+    seed: Option<String>,
 
-    #[arg(
-        long = "senders",
-        value_name = "N",
-        default_value_t = DEFAULT_SENDERS,
-        help = "Number of concurrent senders; 0 means auto",
-        help_heading = "Throughput"
-    )]
-    pub max_inflight_sends: usize,
+    #[arg(long, value_enum, default_value_t = BackendKind::Rpc)]
+    backend: BackendKind,
 
-    #[arg(
-        long = "reveal-after",
-        value_name = "TICKS",
-        default_value_t = DEFAULT_REVEAL_DELAY_TICKS,
-        help = "Delay between commit and reveal; must be a positive multiple of 3",
-        help_heading = "Timing"
-    )]
-    pub reveal_delay_ticks: u32,
+    #[arg(long, value_name = "URL", help = "Endpoint for the selected backend")]
+    endpoint: Option<String>,
 
-    #[arg(
-        long = "reveal-guard",
-        value_name = "TICKS",
-        default_value_t = DEFAULT_REVEAL_SEND_GUARD_TICKS,
-        help = "Early-send guard window before the reveal tick",
-        help_heading = "Timing"
-    )]
-    pub reveal_window_ticks: u32,
-
-    #[arg(
-        long = "collateral",
-        value_name = "AMOUNT",
-        default_value_t = DEFAULT_COMMIT_AMOUNT,
-        help = "Collateral tier for commit/reveal sends",
-        help_heading = "Throughput"
-    )]
-    pub commit_amount: u64,
-
-    #[arg(
-        long = "pipelines",
-        value_name = "N",
-        default_value_t = DEFAULT_COMMIT_REVEAL_PIPELINE_COUNT,
-        value_parser = parse_pipeline_count,
-        help = "Number of parallel commit/reveal pipelines; maximum 3",
-        help_heading = "Throughput"
-    )]
-    pub pipeline_count: usize,
-
-    #[arg(
-        long = "workers",
-        value_name = "N",
-        default_value_t = DEFAULT_RUNTIME_THREADS,
-        help = "Tokio worker threads; 0 means auto",
-        help_heading = "Throughput"
-    )]
-    pub worker_threads: usize,
-
-    #[arg(
-        long = "tick-poll-ms",
-        value_name = "MS",
-        default_value_t = DEFAULT_TICK_POLL_INTERVAL_MS,
-        help = "Tick polling interval in milliseconds",
-        help_heading = "Timing"
-    )]
-    pub tick_poll: u64,
-
-    #[arg(
-        long,
-        value_name = "BACKEND",
-        value_enum,
-        default_value_t = Backend::Rpc,
-        help = "Backend: rpc, bob, grpc",
-        help_heading = "Network"
-    )]
-    pub backend: Backend,
-
-    #[arg(
-        long,
-        value_name = "URL",
-        help = "Endpoint for the selected backend",
-        help_heading = "Network"
-    )]
-    pub endpoint: Option<String>,
-
-    #[arg(
-        long = "balance-ms",
-        value_name = "MS",
-        default_value_t = DEFAULT_BALANCE_INTERVAL_MS,
-        help = "Balance print interval in milliseconds",
-        help_heading = "Monitoring"
-    )]
-    pub balance_interval_ms: u64,
-
-    #[arg(
-        long = "empty-check-ms",
-        value_name = "MS",
-        default_value_t = DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS,
-        help = "Empty-tick check interval in milliseconds",
-        help_heading = "Monitoring"
-    )]
-    pub empty_tick_check_interval_ms: u64,
-
-    #[arg(
-        long = "reveal-verify-after",
-        value_name = "TICKS",
-        default_value_t = DEFAULT_TICK_DATA_MIN_DELAY_TICKS,
-        help = "Delay before checking reveal tick data",
-        help_heading = "Monitoring"
-    )]
-    pub reveal_check_delay_ticks: u32,
+    #[arg(long, default_value_t = DEFAULT_COLLATERAL)]
+    collateral: u64,
 
     #[arg(
         long = "stop-before-epoch-end-secs",
-        value_name = "SECS",
-        default_value_t = DEFAULT_EPOCH_STOP_LEAD_TIME_SECS,
-        help = "Stop sending before epoch end",
-        help_heading = "Timing"
+        default_value_t = DEFAULT_EPOCH_STOP_LEAD_TIME_SECS
     )]
-    pub epoch_stop_lead_time_secs: u64,
+    epoch_stop_lead_time_secs: u64,
 
     #[arg(
         long = "resume-after-epoch-start-ticks",
-        value_name = "TICKS",
-        default_value_t = DEFAULT_EPOCH_RESUME_DELAY_TICKS,
-        help = "Resume sending after epoch start",
-        help_heading = "Timing"
+        default_value_t = DEFAULT_EPOCH_RESUME_DELAY_TICKS
     )]
+    epoch_resume_delay_ticks: u32,
+}
+
+pub struct AppConfig {
+    pub seed: Seed,
+    pub backend: BackendKind,
+    pub endpoint: String,
+    pub collateral: u64,
+    pub epoch_stop_lead_time_secs: u64,
     pub epoch_resume_delay_ticks: u32,
+}
+
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("seed", &self.seed)
+            .field("backend", &self.backend)
+            .field("endpoint", &redacted_endpoint(&self.endpoint))
+            .field("collateral", &self.collateral)
+            .field("epoch_stop_lead_time_secs", &self.epoch_stop_lead_time_secs)
+            .field("epoch_resume_delay_ticks", &self.epoch_resume_delay_ticks)
+            .finish()
+    }
+}
+
+impl AppConfig {
+    pub fn from_cli() -> Result<Self, String> {
+        let mut cli = Cli::parse();
+        let seed = Seed::new(match cli.seed.take() {
+            Some(seed) => seed,
+            None => read_seed_from_stdin()?,
+        })?;
+        validate_collateral(cli.collateral)?;
+        let endpoint = normalize_endpoint(
+            cli.backend,
+            cli.endpoint
+                .unwrap_or_else(|| cli.backend.default_endpoint().to_string()),
+        );
+
+        Ok(Self {
+            seed,
+            backend: cli.backend,
+            endpoint,
+            collateral: cli.collateral,
+            epoch_stop_lead_time_secs: cli.epoch_stop_lead_time_secs,
+            epoch_resume_delay_ticks: cli.epoch_resume_delay_ticks,
+        })
+    }
 }
 
 pub struct Seed(LockedSeed);
 
 impl Seed {
     fn new(mut seed: String) -> Result<Self, String> {
-        if let Err(err) = validate_seed(&seed) {
+        if seed.len() != 55 || !seed.bytes().all(|byte| byte.is_ascii_lowercase()) {
             seed.zeroize();
-            return Err(err);
+            return Err("seed must contain exactly 55 lowercase a-z characters".to_string());
         }
         LockedSeed::new(seed).map(Self)
     }
@@ -202,130 +142,19 @@ impl fmt::Debug for Seed {
     }
 }
 
-#[derive(Debug)]
-pub struct AppConfig {
-    pub seed: Seed,
-    pub runtime: Config,
-}
-
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub max_inflight_sends: usize,
-    pub reveal_delay_ticks: u32,
-    pub reveal_window_ticks: u32,
-    pub commit_amount: u64,
-    pub pipeline_count: usize,
-    pub worker_threads: usize,
-    pub tick_poll: u64,
-    pub endpoint: String,
-    pub backend: Backend,
-    pub balance_interval_ms: u64,
-    pub empty_tick_check_interval_ms: u64,
-    pub reveal_check_delay_ticks: u32,
-    pub epoch_stop_lead_time_secs: u64,
-    pub epoch_resume_delay_ticks: u32,
-    pub legacy_zero_commit_on_stop: bool,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct FileConfig {
-    legacy_zero_commit_on_stop: bool,
-}
-
-impl AppConfig {
-    pub fn from_cli() -> Result<Self, String> {
-        let mut cli = Cli::parse();
-        let file_config = load_file_config(std::path::Path::new("config.toml"))?;
-        let seed_value = resolve_seed(cli.seed.take(), read_seed_from_stdin)?;
-        Self::from_cli_and_file(cli, seed_value, file_config)
-    }
-
-    #[cfg(test)]
-    fn from_cli_inner(cli: Cli, seed_value: String) -> Result<Self, String> {
-        Self::from_cli_and_file(cli, seed_value, FileConfig::default())
-    }
-
-    fn from_cli_and_file(
-        cli: Cli,
-        seed_value: String,
-        file_config: FileConfig,
-    ) -> Result<Self, String> {
-        let seed = Seed::new(seed_value)?;
-        validate_commit_amount(cli.commit_amount)?;
-        validate_reveal_delay_ticks(cli.reveal_delay_ticks)?;
-        validate_pipeline_count(cli.pipeline_count)?;
-        let max_inflight_sends = if cli.max_inflight_sends == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-        } else {
-            cli.max_inflight_sends
-        };
-        let worker_threads = if cli.worker_threads == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-        } else {
-            cli.worker_threads
-        };
-
-        let backend = cli.backend;
-        let endpoint = resolve_endpoint(backend, cli.endpoint);
-
-        Ok(Self {
-            seed,
-            runtime: Config {
-                max_inflight_sends,
-                reveal_delay_ticks: cli.reveal_delay_ticks,
-                reveal_window_ticks: cli.reveal_window_ticks,
-                commit_amount: cli.commit_amount,
-                pipeline_count: cli.pipeline_count,
-                worker_threads,
-                tick_poll: cli.tick_poll,
-                endpoint,
-                backend,
-                balance_interval_ms: cli.balance_interval_ms,
-                empty_tick_check_interval_ms: cli.empty_tick_check_interval_ms,
-                reveal_check_delay_ticks: cli.reveal_check_delay_ticks,
-                epoch_stop_lead_time_secs: cli.epoch_stop_lead_time_secs,
-                epoch_resume_delay_ticks: cli.epoch_resume_delay_ticks,
-                legacy_zero_commit_on_stop: file_config.legacy_zero_commit_on_stop,
-            },
-        })
-    }
-}
-
-fn load_file_config(path: &std::path::Path) -> Result<FileConfig, String> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(FileConfig::default()),
-        Err(err) => {
-            return Err(format!("failed to read {}: {err}", path.display()));
-        }
-    };
-
-    toml::from_str(&contents).map_err(|err| format!("invalid {}: {err}", path.display()))
-}
-
-fn resolve_endpoint(backend: Backend, endpoint: Option<String>) -> String {
-    match endpoint {
-        Some(endpoint) if backend == Backend::Rpc => normalize_rpc_endpoint(endpoint),
-        Some(endpoint) => endpoint.trim().to_string(),
-        None if backend == Backend::Rpc => {
-            normalize_rpc_endpoint(backend.default_endpoint().to_string())
-        }
-        None => backend.default_endpoint().to_string(),
-    }
-}
-
-fn normalize_rpc_endpoint(endpoint: String) -> String {
+fn normalize_endpoint(backend: BackendKind, endpoint: String) -> String {
     let mut endpoint = endpoint.trim().trim_end_matches('/').to_string();
-    if let Some(stripped) = endpoint.strip_suffix("/live/v1") {
-        endpoint = stripped.trim_end_matches('/').to_string();
-    }
-    if let Some(stripped) = endpoint.strip_suffix("/query/v1") {
-        endpoint = stripped.trim_end_matches('/').to_string();
+    if backend == BackendKind::Rpc {
+        for suffix in ["/live/v1", "/query/v1", "/v1"] {
+            if let Some(base) = endpoint.strip_suffix(suffix) {
+                endpoint = base.trim_end_matches('/').to_string();
+                break;
+            }
+        }
+    } else if backend == BackendKind::Bob
+        && let Some(base) = endpoint.strip_suffix("/qubic")
+    {
+        endpoint = base.trim_end_matches('/').to_string();
     }
     if endpoint.contains("://") {
         endpoint
@@ -334,17 +163,18 @@ fn normalize_rpc_endpoint(endpoint: String) -> String {
     }
 }
 
-fn validate_seed(seed: &str) -> Result<(), String> {
-    if seed.len() != 55 {
-        return Err("seed must be 55 characters".to_string());
-    }
-    if !seed.bytes().all(|b| b.is_ascii_lowercase()) {
-        return Err("seed must contain only a-z characters".to_string());
-    }
-    Ok(())
+pub fn redacted_endpoint(endpoint: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(endpoint) else {
+        return "<redacted-endpoint>".to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string().trim_end_matches('/').to_string()
 }
 
-fn validate_commit_amount(amount: u64) -> Result<(), String> {
+fn validate_collateral(amount: u64) -> Result<(), String> {
     if matches!(
         amount,
         1 | 10
@@ -357,84 +187,33 @@ fn validate_commit_amount(amount: u64) -> Result<(), String> {
             | 100_000_000
             | 1_000_000_000
     ) {
-        return Ok(());
-    }
-
-    Err(
-        "--collateral must be one of: 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000"
-            .to_string(),
-    )
-}
-
-fn validate_reveal_delay_ticks(reveal_delay_ticks: u32) -> Result<(), String> {
-    if reveal_delay_ticks > 0 && reveal_delay_ticks.is_multiple_of(3) {
-        return Ok(());
-    }
-
-    Err("--reveal-after must be a positive multiple of 3".to_string())
-}
-
-fn validate_pipeline_count(pipeline_count: usize) -> Result<(), String> {
-    if pipeline_count <= MAX_COMMIT_REVEAL_PIPELINE_COUNT {
-        return Ok(());
-    }
-
-    Err("--pipelines must not be greater than 3".to_string())
-}
-
-fn parse_pipeline_count(value: &str) -> Result<usize, String> {
-    let pipeline_count = value
-        .parse::<usize>()
-        .map_err(|_| "--pipelines must be a non-negative integer".to_string())?;
-    validate_pipeline_count(pipeline_count)?;
-    Ok(pipeline_count)
-}
-
-fn resolve_seed<F>(seed: Option<String>, read_seed: F) -> Result<String, String>
-where
-    F: FnOnce() -> Result<String, String>,
-{
-    if let Some(seed) = seed {
-        Ok(seed)
+        Ok(())
     } else {
-        read_seed()
+        Err("--collateral must be a power of ten from 1 through 1000000000".to_string())
     }
 }
 
 fn read_seed_from_stdin() -> Result<String, String> {
-    let seed = if atty::is(Stream::Stdin) {
+    let mut input = if std::io::stdin().is_terminal() {
         print!("seed: ");
         std::io::stdout()
             .flush()
             .map_err(|err| format!("failed to flush stdout: {err}"))?;
-        let mut input = rpassword::read_password()
-            .map_err(|err| format!("failed to read seed from tty: {err}"))?;
-        let seed = input.trim().to_string();
-        input.zeroize();
-        seed
+        rpassword::read_password().map_err(|err| format!("failed to read seed: {err}"))?
     } else {
-        read_seed_from_reader(std::io::stdin().lock())?
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|err| format!("failed to read seed: {err}"))?;
+        input
     };
-    if seed.is_empty() {
-        return Err("seed from stdin is empty".to_string());
-    }
-    Ok(seed)
-}
-
-fn read_seed_from_reader<R: std::io::BufRead>(mut reader: R) -> Result<String, String> {
-    let mut input = String::new();
-    let bytes = reader
-        .read_line(&mut input)
-        .map_err(|err| format!("failed to read seed from stdin: {err}"))?;
-    if bytes == 0 {
-        return Err("seed from stdin is empty".to_string());
-    }
     let seed = input.trim().to_string();
     input.zeroize();
     if seed.is_empty() {
-        return Err("seed from stdin is empty".to_string());
+        Err("seed from stdin is empty".to_string())
+    } else {
+        Ok(seed)
     }
-    Ok(seed)
 }
 
 struct LockedSeed {
@@ -453,49 +232,46 @@ impl LockedSeed {
     }
 
     fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.bytes).expect("seed must be validated as lowercase ascii")
+        std::str::from_utf8(&self.bytes).expect("validated seed is ASCII")
     }
 }
 
 impl Drop for LockedSeed {
     fn drop(&mut self) {
-        self.bytes.zeroize();
+        self.bytes.as_mut_slice().zeroize();
         unlock_bytes(&self.bytes);
     }
 }
 
 #[cfg(unix)]
 fn lock_bytes(bytes: &[u8]) -> Result<(), String> {
+    // SAFETY: `bytes` is a valid allocation for the supplied length and remains alive.
     let result = unsafe { libc::mlock(bytes.as_ptr().cast(), bytes.len()) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(format!("mlock failed: {}", std::io::Error::last_os_error()))
-    }
+    (result == 0)
+        .then_some(())
+        .ok_or_else(|| format!("mlock failed: {}", std::io::Error::last_os_error()))
 }
 
 #[cfg(unix)]
 fn unlock_bytes(bytes: &[u8]) {
+    // SAFETY: this releases the same live allocation previously passed to `mlock`.
     let _ = unsafe { libc::munlock(bytes.as_ptr().cast(), bytes.len()) };
 }
 
 #[cfg(windows)]
 fn lock_bytes(bytes: &[u8]) -> Result<(), String> {
+    // SAFETY: `bytes` is a valid allocation for the supplied length and remains alive.
     let result = unsafe {
         windows_sys::Win32::System::Memory::VirtualLock(bytes.as_ptr().cast(), bytes.len())
     };
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "VirtualLock failed: {}",
-            std::io::Error::last_os_error()
-        ))
-    }
+    (result != 0)
+        .then_some(())
+        .ok_or_else(|| format!("VirtualLock failed: {}", std::io::Error::last_os_error()))
 }
 
 #[cfg(windows)]
 fn unlock_bytes(bytes: &[u8]) {
+    // SAFETY: this releases the same live allocation previously passed to `VirtualLock`.
     let _ = unsafe {
         windows_sys::Win32::System::Memory::VirtualUnlock(bytes.as_ptr().cast(), bytes.len())
     };
@@ -511,296 +287,38 @@ fn unlock_bytes(_bytes: &[u8]) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AppConfig, Backend, Cli, DEFAULT_BOB_ENDPOINT, DEFAULT_GRPC_ENDPOINT, DEFAULT_RPC_ENDPOINT,
-        Seed, load_file_config, normalize_rpc_endpoint, read_seed_from_reader, resolve_endpoint,
-        resolve_seed, validate_commit_amount, validate_pipeline_count, validate_reveal_delay_ticks,
-        validate_seed,
-    };
-    use clap::Parser;
-    use std::io::Cursor;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static TEMP_FILE_ID: AtomicUsize = AtomicUsize::new(0);
-
-    fn temp_config_path() -> PathBuf {
-        let id = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "random-client-config-{}-{id}.toml",
-            std::process::id()
-        ))
-    }
-
-    fn test_cli() -> Cli {
-        Cli {
-            seed: None,
-            max_inflight_sends: 1,
-            reveal_delay_ticks: 3,
-            reveal_window_ticks: 2,
-            commit_amount: 10,
-            pipeline_count: 1,
-            worker_threads: 1,
-            tick_poll: 10,
-            backend: Backend::Rpc,
-            endpoint: Some("endpoint".to_string()),
-            balance_interval_ms: 10,
-            empty_tick_check_interval_ms: 10,
-            reveal_check_delay_ticks: 10,
-            epoch_stop_lead_time_secs: 600,
-            epoch_resume_delay_ticks: 50,
-        }
-    }
+    use super::*;
 
     #[test]
-    fn validate_seed_accepts_55_lowercase() {
-        // 55 lowercase letters is the only valid seed shape.
-        let seed = "a".repeat(55);
-        assert!(validate_seed(&seed).is_ok());
-    }
-
-    #[test]
-    fn validate_seed_rejects_wrong_length() {
-        // 54 chars should fail length validation.
-        let seed = "a".repeat(54);
-        assert!(validate_seed(&seed).is_err());
-    }
-
-    #[test]
-    fn validate_seed_rejects_non_lowercase() {
-        // Uppercase is not allowed even if length is correct.
-        let seed = "a".repeat(54) + "Z";
-        assert!(validate_seed(&seed).is_err());
-    }
-
-    #[test]
-    fn resolve_seed_prefers_cli_value() {
-        // When --seed is set, stdin must not be read.
-        let mut cli = test_cli();
-        cli.seed = Some("a".repeat(55));
-        let result = resolve_seed(cli.seed, || Err("should not read".to_string()));
-        assert_eq!(result.expect("seed"), "a".repeat(55));
-    }
-
-    #[test]
-    fn resolve_seed_uses_reader_error() {
-        // If --seed is missing, the reader error must be propagated.
-        let cli = test_cli();
-        let err = resolve_seed(cli.seed, || Err("no seed".to_string())).expect_err("expected err");
-        assert_eq!(err, "no seed");
-    }
-
-    #[test]
-    fn read_seed_from_reader_rejects_empty() {
-        // Empty stdin is an error.
-        let cursor = Cursor::new("");
-        let err = read_seed_from_reader(cursor).expect_err("expected error");
-        assert_eq!(err, "seed from stdin is empty");
-    }
-
-    #[test]
-    fn read_seed_from_reader_trims_input() {
-        // Trailing newline is trimmed.
-        let cursor = Cursor::new("abc\n");
-        let seed = read_seed_from_reader(cursor).expect("seed");
-        assert_eq!(seed, "abc");
-    }
-
-    #[test]
-    fn validate_commit_amount_accepts_sc_collateral_tiers() {
-        for amount in [
-            1_u64,
-            10,
-            100,
-            1_000,
-            10_000,
-            100_000,
-            1_000_000,
-            10_000_000,
-            100_000_000,
-            1_000_000_000,
-        ] {
-            assert!(validate_commit_amount(amount).is_ok());
-        }
-    }
-
-    #[test]
-    fn validate_commit_amount_rejects_non_tier_value() {
-        let err = validate_commit_amount(42).expect_err("expected error");
-        assert!(err.contains("--collateral must be one of"));
-    }
-
-    #[test]
-    fn validate_reveal_delay_ticks_accepts_positive_multiples_of_three() {
-        assert!(validate_reveal_delay_ticks(3).is_ok());
-        assert!(validate_reveal_delay_ticks(6).is_ok());
-    }
-
-    #[test]
-    fn validate_reveal_delay_ticks_rejects_invalid_values() {
-        let err = validate_reveal_delay_ticks(0).expect_err("expected error");
-        assert_eq!(err, "--reveal-after must be a positive multiple of 3");
-        let err = validate_reveal_delay_ticks(4).expect_err("expected error");
-        assert_eq!(err, "--reveal-after must be a positive multiple of 3");
-    }
-
-    #[test]
-    fn validate_pipeline_count_accepts_zero_through_three() {
-        for pipeline_count in 0..=3 {
-            assert!(validate_pipeline_count(pipeline_count).is_ok());
-        }
-    }
-
-    #[test]
-    fn validate_pipeline_count_rejects_values_greater_than_three() {
-        for pipeline_count in [4, 5, usize::MAX] {
-            let err = validate_pipeline_count(pipeline_count).expect_err("expected error");
-            assert_eq!(err, "--pipelines must not be greater than 3");
-        }
-    }
-
-    #[test]
-    fn cli_accepts_one_through_three_pipelines() {
-        for pipeline_count in 1..=3 {
-            let value = pipeline_count.to_string();
-            let cli = Cli::try_parse_from(["random-client", "--pipelines", &value])
-                .expect("valid pipeline count");
-            assert_eq!(cli.pipeline_count, pipeline_count);
-        }
-    }
-
-    #[test]
-    fn cli_rejects_more_than_three_pipelines() {
-        let err = Cli::try_parse_from(["random-client", "--pipelines", "4"])
-            .expect_err("invalid pipeline count");
-        assert!(
-            err.to_string()
-                .contains("--pipelines must not be greater than 3")
-        );
-    }
-
-    #[test]
-    fn from_cli_inner_auto_threads_and_max_inflight_sends() {
-        // Zero values are replaced by available_parallelism.
-        let mut cli = test_cli();
-        cli.max_inflight_sends = 0;
-        cli.worker_threads = 0;
-        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
-        assert!(config.runtime.max_inflight_sends > 0);
-        assert!(config.runtime.worker_threads > 0);
-    }
-
-    #[test]
-    fn from_cli_inner_uses_bob_default_endpoint() {
-        let mut cli = test_cli();
-        cli.backend = Backend::Bob;
-        cli.endpoint = None;
-        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
-        assert_eq!(config.runtime.backend, Backend::Bob);
-        assert_eq!(config.runtime.endpoint, DEFAULT_BOB_ENDPOINT);
-    }
-
-    #[test]
-    fn from_cli_inner_uses_rpc_default_endpoint() {
-        let mut cli = test_cli();
-        cli.endpoint = None;
-        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
-        assert_eq!(config.runtime.endpoint, DEFAULT_RPC_ENDPOINT);
-    }
-
-    #[test]
-    fn from_cli_inner_normalizes_rpc_ip_port() {
-        let mut cli = test_cli();
-        cli.endpoint = Some("127.0.0.1:21841".to_string());
-        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
-        assert_eq!(config.runtime.endpoint, "http://127.0.0.1:21841");
-    }
-
-    #[test]
-    fn normalize_rpc_endpoint_strips_known_suffixes() {
-        let endpoint = normalize_rpc_endpoint("https://rpc.qubic.org/live/v1/".to_string());
-        assert_eq!(endpoint, "https://rpc.qubic.org");
-        let endpoint = normalize_rpc_endpoint("https://rpc.qubic.org/query/v1".to_string());
-        assert_eq!(endpoint, "https://rpc.qubic.org");
-    }
-
-    #[test]
-    fn from_cli_inner_rejects_invalid_commit_amount() {
-        let mut cli = test_cli();
-        cli.commit_amount = 42;
-        let err = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect_err("expected err");
-        assert!(err.contains("--collateral must be one of"));
-    }
-
-    #[test]
-    fn from_cli_inner_rejects_reveal_delay_not_multiple_of_three() {
-        let mut cli = test_cli();
-        cli.reveal_delay_ticks = 4;
-        let err = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect_err("expected err");
-        assert_eq!(err, "--reveal-after must be a positive multiple of 3");
-    }
-
-    #[test]
-    fn from_cli_inner_rejects_too_many_pipelines() {
-        let mut cli = test_cli();
-        cli.pipeline_count = 4;
-        let err = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect_err("expected err");
-        assert_eq!(err, "--pipelines must not be greater than 3");
-    }
-
-    #[test]
-    fn from_cli_inner_uses_grpc_custom_endpoint() {
-        let mut cli = test_cli();
-        cli.backend = Backend::QlnGrpc;
-        cli.endpoint = Some("http://127.0.0.1:50052".to_string());
-        let config = AppConfig::from_cli_inner(cli, "a".repeat(55)).expect("config");
-        assert_eq!(config.runtime.backend, Backend::QlnGrpc);
-        assert_eq!(config.runtime.endpoint, "http://127.0.0.1:50052");
-    }
-
-    #[test]
-    fn resolve_endpoint_uses_backend_default() {
+    fn endpoint_normalization_is_backend_specific() {
         assert_eq!(
-            resolve_endpoint(Backend::QlnGrpc, None),
-            DEFAULT_GRPC_ENDPOINT
+            normalize_endpoint(BackendKind::Rpc, "rpc.qubic.org/live/v1/".to_string()),
+            "http://rpc.qubic.org"
         );
-        assert_eq!(resolve_endpoint(Backend::Bob, None), DEFAULT_BOB_ENDPOINT);
+        assert_eq!(
+            normalize_endpoint(BackendKind::Bob, "http://localhost:40420/qubic".to_string()),
+            "http://localhost:40420"
+        );
     }
 
     #[test]
-    fn seed_expose_returns_original() {
-        // Seed::expose returns the exact original string.
-        let seed_value = "a".repeat(55);
-        let seed = Seed::new(seed_value.clone()).expect("seed");
-        assert_eq!(seed.expose(), seed_value);
+    fn collateral_accepts_only_contract_tiers() {
+        assert!(validate_collateral(1_000_000_000).is_ok());
+        assert!(validate_collateral(0).is_err());
+        assert!(validate_collateral(11).is_err());
     }
 
     #[test]
-    fn missing_file_config_uses_modern_default() {
-        let path = temp_config_path();
-        let config = load_file_config(&path).expect("missing config uses defaults");
-        assert!(!config.legacy_zero_commit_on_stop);
+    fn debug_never_exposes_seed() {
+        let seed = Seed::new("a".repeat(55)).expect("valid seed");
+        assert_eq!(format!("{seed:?}"), "Seed(REDACTED)");
     }
 
     #[test]
-    fn file_config_loads_explicit_boolean_values() {
-        for value in [false, true] {
-            let path = temp_config_path();
-            std::fs::write(&path, format!("legacy_zero_commit_on_stop = {value}\n"))
-                .expect("write config");
-            let config = load_file_config(&path).expect("load config");
-            std::fs::remove_file(path).expect("remove config");
-            assert_eq!(config.legacy_zero_commit_on_stop, value);
-        }
-    }
-
-    #[test]
-    fn invalid_file_config_is_rejected_with_path() {
-        let path = temp_config_path();
-        std::fs::write(&path, "legacy_zero_commit_on_stop = maybe\n").expect("write config");
-        let err = load_file_config(&path).expect_err("invalid config");
-        std::fs::remove_file(&path).expect("remove config");
-        assert!(err.contains("invalid"));
-        assert!(err.contains(path.to_string_lossy().as_ref()));
+    fn endpoint_redaction_removes_credentials_and_query() {
+        assert_eq!(
+            redacted_endpoint("https://alice:secret@example.invalid:8443/api?token=secret#part"),
+            "https://example.invalid:8443/api"
+        );
     }
 }
