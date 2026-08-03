@@ -1,55 +1,27 @@
 # Random Client
 
-`random-client` is a Rust provider client for the Qubic Random smart contract.
-It maintains one provider slot in each Random stream and runs the
-`commit -> reveal + commit` cycle continuously.
+Small Rust provider client for the Qubic Random smart contract. One process
+maintains one provider chain for the configured collateral tier in each of the
+three Random streams and continuously sends `RevealAndCommit` transactions.
 
-The client supports three independent backends:
+Supported backends:
 
 - `rpc` — Qubic HTTP RPC;
-- `bob` — Bob JSON-RPC;
-- `grpc` — the local `QubicLightNode` gRPC API.
+- `bob` — Bob JSON-RPC through SCAPI;
+- `grpc` — QubicLightNode gRPC.
 
-Every backend supplies tick, balance, transaction broadcast, and generic
-smart-contract function queries. The client uses Random's
-`GetProviderStatus` function to verify contract execution; accepting a
-broadcast is not treated as proof that the contract accepted the call.
-
-## Architecture
-
-- `config` owns CLI parsing, validation, and protected seed storage.
-- `backend` exposes one transport-neutral interface implemented by RPC, Bob,
-  and QubicLightNode.
-- `contract` owns the exact Random wire layout and its validation.
-- `engine` owns three independent predictive commit/reveal schedulers.
-- `app` only constructs these components and handles process signals.
-
-SCAPI remains pinned to the existing revision. It is used for wallet/identity
-handling, transaction construction and signing, and the existing RPC and Bob
-clients. Random-specific encoding, status decoding, and scheduling are kept
-outside SCAPI.
-
-## Build
+## Build and run
 
 Rust stable with edition 2024 support is required.
 
 ```bash
 cargo build --release --locked
 cargo test --all-targets
-```
-
-The executable is `target/release/random-client`.
-
-## Run
-
-```bash
 cargo run --release -- --seed <55-letter-seed>
 ```
 
-If `--seed` is omitted, it is read from the terminal without echo or from the
-first line of redirected standard input.
-
-Main options:
+If `--seed` is omitted, it is read without echo from an interactive terminal,
+or from the first redirected input line.
 
 ```text
 --backend <rpc|bob|grpc>
@@ -60,84 +32,75 @@ Main options:
 --resume-after-epoch-start-ticks <TICKS>
 ```
 
-Default endpoints:
+Defaults:
 
 - RPC: `https://rpc.qubic.org`
 - Bob: `http://localhost:40420`
 - gRPC: `http://127.0.0.1:50051`
+- collateral: `10000`
+- pre-epoch drain: 600 seconds before Wednesday 12:00 UTC
+- new-epoch warmup: 50 ticks
 
-Allowed collateral values are `1`, `10`, `100`, `1000`, `10000`, `100000`,
-`1000000`, `10000000`, `100000000`, and `1000000000`.
+Collateral must be a power of ten from `1` through `1000000000`. The client no
+longer performs a balance precheck. An underfunded first commit is detected in
+the same way as any other rejected enrollment: the exact `(stream, tier)`
+remains absent from a later `GetProviderStatus` response, and the client starts
+a fresh chain.
 
-The client uses the same collateral tier in streams 0, 1, and 2. A fresh
-three-stream enrollment needs three locked collateral amounts plus one liquid
-collateral amount for subsequent reveal calls.
+## Runtime behavior
 
-## Reconciliation, epochs, and shutdown
+The client continuously runs one `GetProviderStatus` request at a time. A
+successfully decoded response is applied directly. It does not start a stream
+while that exact `(stream, collateral tier)` is occupied, because commit
+preimages are held only in process memory. One absent response requested at an
+eligible tick permits a fresh first commit (`zero reveal + non-zero commit`).
 
-Commit preimages exist only in process memory. After restart, any provider
-slot already reported by the contract is treated as unmanaged because its
-preimage is unavailable. The client waits for that exact `(stream, tier)` slot
-to disappear before opening a new chain.
+Each stream uses only ticks where `tick % 3 == stream`; consecutive calls in a
+chain are three ticks apart. Transactions are prepared for fixed target ticks
+and become eligible for broadcast six ticks early. One successful backend
+acceptance completes delivery. A failed delivery is retried with identical
+signed bytes, independently from the other calls and streams. Nothing is
+broadcast at or after its target tick.
 
-The scheduler does not wait for `GetProviderStatus` before building the next
-call. It keeps at most four unfinished future calls through nine ticks ahead;
-calls become eligible for broadcast six ticks before their target. If polling
-skips that exact boundary, the call is still attempted before its target. Each
-queued call owns its exact signed transaction bytes and its own broadcast task,
-so a slow stream or backend request cannot block the other streams. Ambiguous
-transport failures are retried with identical bytes until the original target
-tick.
+The client keeps planning `reveal + commit` calls without waiting for
+`lastUpdateTick` to advance. An older local `lastUpdateTick` does not stop a
+chain. If one eligible response no longer contains the exact slot, the local
+tail is discarded. The first target of the replacement chain is both at least
+six ticks ahead and later than the discarded signed tail. A target that expires
+without backend acceptance also stops the chain; one later absent response from
+a query requested after that break permits restart.
 
-`GetProviderStatus` is only a consistency check. A `lastUpdateTick` matching
-any target signed by the current local generation confirms that target and
-every earlier call in the generation. Missing, older, delayed, or failed status
-requests do not by themselves pause predictive broadcasts. An empty or lagging
-successful status remains inconclusive through the next complete stream cycle
-(`T + 3`). A response requested at or after that deadline which still contains
-none of the expected targets confirms a predictive-chain break. A newer target
-which was never signed locally makes the slot unmanaged because its current
-preimage is unknown.
+Backend acceptance is not proof of contract execution. For RPC and Bob,
+provider status comes from their contract-query endpoint. For QubicLightNode,
+it is peer-trusted as described below. A target from the local three-tick
+sequence confirms that the chain is still owned. A foreign target means
+the local preimage chain is no longer trustworthy: the client discards it and
+waits until a later fresh response reports the exact slot absent before
+starting again.
 
-After a confirmed or locally detected break, the client stops sending that
-slot's queued work and reconciles with a status request started after the
-break. If status reports a locally accepted target, the client uses the
-preimage committed at that exact target and resumes with a future normal
-`reveal + commit`. If status reports the slot absent, the old work is discarded
-and the client may enroll again using `zero reveal + new nonzero commit`. If
-the slot remains occupied but its outstanding preimage is not known, the slot
-becomes unmanaged and waits for contract eviction.
+## Epochs and shutdown
 
-The client never sends `reveal + zero commit` as post-failure recovery. That
-terminal form is safe only while the local outstanding preimage is still known,
-so it is reserved for proactive epoch drain and graceful process shutdown.
+Wall-clock epoch calculation treats Wednesday 12:00 UTC as the boundary. By
+default, 600 seconds before it the client freezes normal planning, finishes the
+already planned tail, and sends one terminal `reveal + zero commit` per managed
+stream. Normal prerequisites use the same one-acceptance policy. Failed
+prerequisite deliveries and the terminal call are retried with identical bytes
+until accepted by the backend or expired. No replacement chain is opened until
+the backend reports a new epoch.
 
-The client starts epoch drain 600 seconds before Wednesday 12:00 UTC by default
-and pauses enrollment for the first 50 ticks after an observed epoch change.
-QubicLightNode does not report the epoch's initial tick, so with that backend
-the first verified tick observed after startup or an epoch change starts the
-same conservative 50-tick pause. The two CLI options above override those
-windows. Old-epoch signed work is discarded when the epoch number changes, and
-status ownership is established again from `Unknown`.
+When the epoch number changes, all old tasks, transactions, and preimages are
+discarded. Enrollment is paused until `initial_tick + 50` by default. With
+QubicLightNode, which does not expose `initial_tick`, the first verified tick
+observed in the epoch is used conservatively as the local initial tick.
 
-Balance queries are only used when opening vacant slots. A balance failure
-does not delay pending broadcasts or reveals for already managed slots. The
-old tick-data heuristic has been removed because unrelated transactions could
-produce false confirmations.
-
-On Windows, Ctrl+C, Ctrl+Break, console close, logoff, and system shutdown
-start graceful shutdown. On Unix, SIGINT, SIGTERM, SIGQUIT, and SIGHUP do the
-same. No new slots are opened. Each safely managed scheduler freezes its current
-predictive tail and submits a terminal `reveal + zero commit` three ticks later;
-it does not create a replacement first commit. Shutdown succeeds only after all
-prerequisite calls and the terminal call have backend acceptance. An expired
-required call or the 90-second deadline returns an error. A chain already in
-reconciliation is not speculatively drained.
-
-Run only one writer for a given identity and collateral tier. A competing
-client cannot be detected before it changes contract state. Also note that the
-six-tick availability lead exposes reveal material to the selected backend
-before the target tick; use a backend you trust with that early reveal.
+Windows console shutdown events and Unix `SIGINT`, `SIGTERM`, `SIGQUIT`, and
+`SIGHUP` freeze normal planning too. The client first waits for backend
+acceptance of every call in the frozen normal tail; one acceptance per call is
+sufficient. When the terminal target enters the six-tick window, it makes one
+terminal broadcast attempt per managed stream and exits after all attempts. A
+failed/expired prerequisite, a failed terminal attempt, or the 90-second
+shutdown deadline returns an error. The client does not wait for a later status
+query after terminal backend acceptance.
 
 ## QubicLightNode
 
@@ -147,34 +110,44 @@ The companion source is expected at:
 D:\Work\MySelf\Qubic\QubicLightNode
 ```
 
-The client protocol matches QubicLightNode 0.2.0 at commit
-`99d17ddc008e05d094a16a09c93f7f779d012116`. Tick status is unavailable until
-the node has authenticated its computor list and collected a FourQ-verified
-quorum of 451 matching votes. The quorum format does not provide
-`initial_tick` or `tick_duration_ms`; the client conservatively uses the first
-verified tick seen in each epoch and a 1,000 ms duration. Its generic
-`QueryContractFunction` method continues to accept a contract index, function
-input type, and raw input bytes and returns raw output bytes.
+The protocol tracks the current QubicLightNode `HEAD` in that checkout. Tick
+status is unavailable until the node has authenticated its computor list and
+collected a FourQ-verified quorum of 451 matching votes. Missing
+`initial_tick` and `tick_duration_ms` are normalized to the first verified tick
+of the epoch and 1,000 ms respectively.
 
-`compose.yaml` uses `QubicLightNode` itself as the light-node build context.
-Its `Dockerfile` and `.dockerignore` live in that repository, so unrelated
-sibling projects and local build artifacts are not sent to the Docker daemon:
+`QueryContractFunction` is an ordinary unary RPC returning one accepted peer
+response. RandomClient applies that response directly. A transport error,
+malformed output, or timeout discards the observation while current chains
+continue. This status is peer-trusted data, not cryptographic authentication or
+a Qubic consensus proof. QubicLightNode still verifies tick quorum and
+transaction signatures locally before forwarding transactions.
+
+`compose.yaml` uses the QubicLightNode checkout as its build context:
 
 ```bash
 docker compose up --build
 ```
 
-The compose client uses `grpc` and connects to `http://light-node:50051`.
+At the current QubicLightNode `HEAD`, this build is blocked because its
+`Dockerfile` does not copy the path dependency `crates/qubic-fourq-verifier`
+into the builder. RandomClient intentionally carries no duplicate Dockerfile
+workaround. The compose client connects to `http://light-node:50051`.
 
-## Protocol
+## Protocol and security notes
 
-[`docs/Random.h`](docs/Random.h) is the source of truth for the smart-contract
-interface. The client currently uses:
+[`docs/Random.h`](docs/Random.h) is the smart-contract source of truth. The
+client uses contract index `3`, `RevealAndCommit` procedure `1`, and
+`GetProviderStatus` function `2`. Procedure input is 544 bytes: a 512-byte
+reveal followed by a 32-byte commitment. Status input is the raw 32-byte public
+key; output is the aligned 680-byte structure from the header.
 
-- contract index `3`;
-- `RevealAndCommit` procedure `1`;
-- `GetProviderStatus` function `2`.
+Run exactly one writer for an identity/collateral tier. A competing process can
+invalidate the local preimage chain before its foreign target appears in the
+selected backend's status response. Seeds, preimages, and signed bytes are
+never logged or persisted. Broadcasting six ticks early
+reveals preimage material to the selected backend before the target tick, so
+the backend must be trusted with that availability/confidentiality tradeoff.
 
-`GetProviderStatus` input is the provider's raw 32-byte public key. Its output
-is the 680-byte QPI structure described by the header, including alignment
-padding before `lockedCollateral`.
+Developer-level states and invariants are specified in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).

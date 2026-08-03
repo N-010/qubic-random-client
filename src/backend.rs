@@ -8,14 +8,14 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use scapi::bob::BobRpcClient;
 use scapi::rpc::post::broadcast_transaction_with;
-use scapi::rpc::{RpcClient, get_balance_with, get_tick_info_with};
+use scapi::rpc::{RpcClient, get_tick_info_with};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
 use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
 
-use crate::bob::{extract_result, extract_string_field, extract_u64_field, value_to_u64};
+use crate::bob::{extract_result, extract_string_field, extract_u64_field};
 use crate::config::{AppConfig, BackendKind};
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
@@ -57,7 +57,6 @@ impl std::error::Error for BackendError {}
 #[async_trait]
 pub trait NetworkBackend: Send + Sync {
     async fn tick_info(&self) -> Result<TickInfo, BackendError>;
-    async fn balance(&self, identity: &str) -> Result<u64, BackendError>;
     async fn query_contract_function(
         &self,
         request: ContractFunctionRequest,
@@ -108,19 +107,8 @@ impl NetworkBackend for RpcBackend {
             epoch: response.tick_info.epoch,
             tick: response.tick_info.tick,
             initial_tick: response.tick_info.initial_tick,
-            tick_duration_ms: response.tick_info.duration.max(1),
+            tick_duration_ms: normalize_rpc_tick_duration_ms(response.tick_info.duration),
         })
-    }
-
-    async fn balance(&self, identity: &str) -> Result<u64, BackendError> {
-        let response = get_balance_with(&self.live, identity)
-            .await
-            .map_err(|err| BackendError::new(format!("RPC balance failed: {err}")))?;
-        response
-            .balance
-            .balance
-            .parse()
-            .map_err(|err| BackendError::new(format!("RPC returned invalid balance: {err}")))
     }
 
     async fn query_contract_function(
@@ -207,25 +195,6 @@ impl NetworkBackend for BobBackend {
             initial_tick,
             tick_duration_ms,
         })
-    }
-
-    async fn balance(&self, identity: &str) -> Result<u64, BackendError> {
-        let result = extract_result(
-            self.rpc
-                .qubic_get_balance(identity)
-                .await
-                .map_err(|err| BackendError::new(format!("Bob balance failed: {err}")))?,
-        )
-        .map_err(BackendError::new)?;
-        value_to_u64(&result)
-            .or_else(|| extract_u64_field(&result, &["balance", "amount", "value"]))
-            .or_else(|| {
-                result.get("balance").and_then(|balance| {
-                    value_to_u64(balance)
-                        .or_else(|| extract_u64_field(balance, &["balance", "amount", "value"]))
-                })
-            })
-            .ok_or_else(|| BackendError::new(format!("Bob returned invalid balance: {result}")))
     }
 
     async fn query_contract_function(
@@ -383,29 +352,6 @@ impl NetworkBackend for QlnBackend {
         Ok(normalize_qln_tick_info(status, &mut fallback))
     }
 
-    async fn balance(&self, identity: &str) -> Result<u64, BackendError> {
-        let mut client = self.client.clone();
-        let response = client
-            .get_balance(Request::new(lightnodepb::GetBalanceRequest {
-                wallet: identity.to_string(),
-            }))
-            .await
-            .map_err(|err| BackendError::new(format!("QLN balance failed: {err}")))?
-            .into_inner();
-        if !response.ok {
-            return Err(BackendError::new(format!(
-                "QLN balance failed: {}",
-                response.error
-            )));
-        }
-        let balance = response
-            .balance
-            .ok_or_else(|| BackendError::new("QLN balance response is missing balance"))?
-            .balance;
-        u64::try_from(balance)
-            .map_err(|_| BackendError::new(format!("QLN returned negative balance: {balance}")))
-    }
-
     async fn query_contract_function(
         &self,
         request: ContractFunctionRequest,
@@ -454,6 +400,14 @@ fn validate_transaction_id(transaction_id: String) -> Result<String, BackendErro
         ))
     } else {
         Ok(transaction_id)
+    }
+}
+
+fn normalize_rpc_tick_duration_ms(duration_ms: u32) -> u32 {
+    if duration_ms == 0 {
+        DEFAULT_TICK_DURATION_MS
+    } else {
+        duration_ms
     }
 }
 
@@ -511,6 +465,12 @@ mod tests {
         assert!(validate_transaction_id(String::new()).is_err());
         assert!(validate_transaction_id("   ".to_string()).is_err());
         assert_eq!(validate_transaction_id("abc".to_string()).unwrap(), "abc");
+    }
+
+    #[test]
+    fn rpc_missing_tick_duration_uses_stable_fallback() {
+        assert_eq!(normalize_rpc_tick_duration_ms(0), DEFAULT_TICK_DURATION_MS);
+        assert_eq!(normalize_rpc_tick_duration_ms(750), 750);
     }
 
     #[test]
