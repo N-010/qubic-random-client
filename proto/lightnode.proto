@@ -14,7 +14,8 @@ message GetStatusRequest {}
 message TickStatus {
   uint32 epoch = 1;
   uint32 tick = 2;
-  // The quorum vote format does not provide initial_tick or tick_duration_ms.
+  // BroadcastTick does not provide initial_tick or tick_duration_ms. The
+  // structurally parsed cache currently exposes only epoch and tick.
   uint32 initial_tick = 3;
   uint32 tick_duration_ms = 4;
   uint32 aligned_votes = 5;

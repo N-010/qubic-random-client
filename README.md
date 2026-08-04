@@ -80,21 +80,29 @@ not prove that this client's transaction executed. The interval and delay are
 configurable through `--empty-check-ms` and `--reveal-verify-after`; both must
 be greater than zero. Counters are cumulative for the process lifetime.
 
-The client keeps planning `reveal + commit` calls without waiting for
-`lastUpdateTick` to advance. An older local `lastUpdateTick` does not stop a
-chain. If one eligible response no longer contains the exact slot, the local
-tail is discarded. The first target of the replacement chain is both at least
-six ticks ahead and later than the discarded signed tail. A target that expires
-without backend acceptance also stops the chain; one later absent response from
-a query requested after that break permits restart.
+The client keeps planning `reveal + commit` calls without waiting for every
+`lastUpdateTick`. It treats the greatest local status tick as an acknowledgement
+watermark. One response that lags behind a signed target starts a suspicion; a
+second successfully decoded response requested at a later tick must leave that
+same target unconfirmed before the chain is frozen. Advancement clears the
+suspicion, and an older regressing response is ignored as stale.
+
+After confirmed acknowledgement lag, status absence, or a foreign target, no
+new calls are planned. The client still applies the normal delivery policy to
+the already signed six-tick tail, then discards its untrusted preimages and
+waits for the exact slot to be absent. No terminal reveal is created for that
+untrusted chain. The replacement first target is both at least six ticks ahead
+and later than the frozen signed tail. A target that expires without backend
+acceptance outside this frozen recovery still stops the chain immediately; one
+later absent response from a query requested after that break permits restart.
 
 Backend acceptance is not proof of contract execution. For RPC and Bob,
 provider status comes from their contract-query endpoint. For QubicLightNode,
 it is peer-trusted as described below. A target from the local three-tick
-sequence confirms that the chain is still owned. A foreign target means
-the local preimage chain is no longer trustworthy: the client discards it and
-waits until a later fresh response reports the exact slot absent before
-starting again.
+sequence advances the local acknowledgement watermark. A foreign target makes
+the preimage chain untrustworthy. `GetProviderStatus` cannot distinguish a
+competing writer that targets the same stream tick; that conflict becomes
+visible only after a later foreign update or disappearance.
 
 ## Epochs and shutdown
 
@@ -108,8 +116,9 @@ the backend reports a new epoch.
 
 When the epoch number changes, all old tasks, transactions, and preimages are
 discarded. Enrollment is paused until `initial_tick + 50` by default. With
-QubicLightNode, which does not expose `initial_tick`, the first verified tick
-observed in the epoch is used conservatively as the local initial tick.
+QubicLightNode, which does not expose `initial_tick`, the first structurally
+valid peer-reported tick observed in the epoch is used conservatively as the
+local initial tick.
 
 Windows console shutdown events and Unix `SIGINT`, `SIGTERM`, `SIGQUIT`, and
 `SIGHUP` freeze normal planning too. The client first waits for backend
@@ -120,6 +129,10 @@ failed/expired prerequisite, a failed terminal attempt, or the 90-second
 shutdown deadline returns an error. The client does not wait for a later status
 query after terminal backend acceptance.
 
+If status recovery already made a chain untrustworthy, pre-epoch drain or
+shutdown waits only for its frozen signed tail and does not append
+`reveal + zero commit`.
+
 ## QubicLightNode
 
 The companion source is expected at:
@@ -129,17 +142,17 @@ D:\Work\MySelf\Qubic\QubicLightNode
 ```
 
 The protocol tracks the current QubicLightNode `HEAD` in that checkout. Tick
-status is unavailable until the node has authenticated its computor list and
-collected a FourQ-verified quorum of 451 matching votes. Missing
-`initial_tick` and `tick_duration_ms` are normalized to the first verified tick
-of the epoch and 1,000 ms respectively.
+status advances after one exact-size, structurally valid `BroadcastTick` or
+`RespondCurrentTickInfo` message. It is deliberately not signature- or
+quorum-authenticated. Missing `initial_tick` and `tick_duration_ms` are
+normalized to the first observed tick of the epoch and 1,000 ms respectively.
 
 `QueryContractFunction` is an ordinary unary RPC returning one accepted peer
 response. RandomClient applies that response directly. A transport error,
 malformed output, or timeout discards the observation while current chains
-continue. This status is peer-trusted data, not cryptographic authentication or
-a Qubic consensus proof. QubicLightNode still verifies tick quorum and
-transaction signatures locally before forwarding transactions.
+continue. Contract output and tick status are peer-trusted data, not
+cryptographic authentication or a Qubic consensus proof. QubicLightNode still
+verifies transaction signatures locally before forwarding transactions.
 `GetTickTransactions` is used only for delayed empty-tick monitoring and does
 not affect provider state or scheduling. QubicLightNode derives its boolean
 result from an exact-size Core `TickData` after checking the requested tick,

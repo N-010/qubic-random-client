@@ -105,10 +105,14 @@ remains active while tick calls are awaited.
   until its target. Reveal, commitment, tick, signature, and transaction ID
   are never regenerated or retargeted. Nothing is broadcast at or after the
   target.
-- Planning continues before first-commit confirmation and while successful
-  status observations contain an older locally signed `lastUpdateTick`.
-- If any required target arrives without backend acceptance, that local chain
-  stops and waits for a status query requested after the discontinuity.
+- Planning continues without waiting for each target confirmation. One older
+  local `lastUpdateTick` starts a suspicion; only a second successfully decoded
+  observation requested at a later tick with the same first unconfirmed target
+  freezes the chain. Status advancement clears the suspicion, and a regressing
+  local tick is treated as stale.
+- While `Starting` or `Active`, if any required target arrives without backend
+  acceptance, that local chain stops and waits for a status query requested
+  after the discontinuity. `Restarting` follows its frozen-tail rule below.
 - Backend acceptance proves only submission to the backend, not execution by
   the contract.
 - Preimages use OS randomness, commitments use KangarooTwelve, and secrets stay
@@ -159,8 +163,9 @@ empty tick.
 | State | Meaning | Principal exits |
 | --- | --- | --- |
 | `Waiting` | No usable local chain. It may be waiting for a fresh absence or for a restart target window. | `Starting` after one eligible absent status response; remains waiting while occupied. |
-| `Starting` | A fresh first commit and its predictive continuation are locally known. | `Active` after one owned status response; `Waiting` after one eligible absent or foreign response; `Draining` when requested. |
-| `Active` | The local reveal/commit chain is continuously extended. | `Waiting` after one absent or foreign response, or a missed target; `Draining` when requested. |
+| `Starting` | A fresh first commit and its predictive continuation are locally known. | `Active` after one owned status response; `Restarting` after one eligible absent or foreign response; `Draining` when requested. |
+| `Active` | The local reveal/commit chain is continuously extended. | `Restarting` after status absence, a foreign target, or confirmed acknowledgement lag; `Waiting` after a missed target; `Draining` when requested. |
+| `Restarting` | Status made the local chain untrustworthy. Planning is frozen, but its already signed six-tick tail keeps its normal delivery policy. | `Waiting` after the frozen tail finishes; `Drained` if epoch drain or shutdown was requested. |
 | `Draining` | Normal planning is frozen and a terminal reveal follows the frozen tail. | `Drained` after acceptance or failure/expiry. |
 | `Drained` | No more transactions are created in this epoch or shutdown flow. | `Waiting` only after an observed epoch-number change. |
 
@@ -175,20 +180,30 @@ transport failure, timeout, or malformed response is discarded and current
 chains remain unchanged. Each successfully decoded response directly
 classifies an exact `(stream, tier)` as owned, absent, or foreign.
 
-An owned response has a `lastUpdateTick` in the uninterrupted local target
-sequence. Older or delayed owned ticks do not stop planning. An absent response
-stops an `Active` chain immediately. For `Starting`, absence is ignored until
-the response was requested after the first target could execute. A target
-outside the local sequence means the local preimage chain is no longer
-trustworthy. The engine discards it and waits for a later successfully decoded
-response that reports the exact slot absent; it does not send a terminal reveal
-for the discarded chain.
+An owned response has a `lastUpdateTick` in the uninterrupted signed local
+target sequence. The chain keeps the greatest such tick as an acknowledgement
+watermark. For a status query requested at tick `R`, only signed targets below
+`R` are due. If the first due target after the watermark remains unconfirmed in
+two successfully decoded observations with increasing request ticks, the chain
+becomes untrustworthy. Advancement resets the suspicion; a response below the
+watermark is stale and cannot confirm a lag. A target outside the signed local
+sequence is immediately foreign. For `Starting`, absence is ignored until the
+response was requested after the first target could execute.
 
-On observed disappearance the engine aborts old broadcasts, drops old
-transactions and preimages, and records the old signed tail. The same absent
-response permits a replacement immediately; its first target is the matching
-stream tick at or after both `current + 6` and `old_tail + 3`. If the target is
-farther away, broadcast waits until it enters the fixed six-tick window.
+Status absence, a foreign target, or confirmed acknowledgement lag freezes the
+current signed tail instead of aborting it. No new calls are planned, while all
+already signed calls through the old six-tick horizon retain identical-byte
+retry until backend acceptance or target expiry. Expiry of one call during this
+frozen disposal does not prevent later signed calls from being attempted. Once
+the tail target is reached, its transactions and preimages are discarded. No
+terminal reveal is created because the outstanding preimage is no longer
+trusted.
+
+A replacement still requires one successfully decoded observation that reports
+the exact slot absent. An eligible absence observed while the tail is frozen is
+retained unless a later status reports the slot occupied again. The replacement
+first target is the matching stream tick at or after both `current + 6` and
+`old_tail + 3`; if farther away, broadcast waits for the fixed six-tick window.
 
 After a locally missed target, one absent response from a query requested after
 the discontinuity permits a fresh chain. The client never sends a speculative
@@ -207,8 +222,8 @@ observation. Enrollment is paused until `initial_tick + 50` by default,
 configurable with `--resume-after-epoch-start-ticks`.
 
 QubicLightNode `HEAD` does not expose the epoch's initial tick. Its adapter uses
-the first verified-quorum tick observed in that epoch as a conservative local
-initial tick, including at process startup.
+the first structurally valid peer-reported tick observed in that epoch as a
+conservative local initial tick, including at process startup.
 
 ## Pre-epoch drain
 
@@ -225,6 +240,10 @@ Pre-epoch drain is intentionally retained:
 
 Slots without a known chain require no terminal call. Contract status is not
 used to start a replacement while the epoch is draining.
+
+If status recovery already marked a chain untrustworthy, pre-epoch drain lets
+its frozen signed tail finish but never appends a terminal reveal. The slot then
+remains drained until the new epoch.
 
 ## Graceful shutdown
 
@@ -244,6 +263,10 @@ deadline makes shutdown fail.
 If shutdown arrives during an existing pre-epoch drain, it waits on that
 already frozen drain under the same overall deadline; it does not create a
 second terminal transaction.
+
+If shutdown arrives during status recovery, it waits for the already frozen
+signed tail under the same deadline and does not create a terminal reveal for
+the untrustworthy chain.
 
 ## Backend boundary
 
@@ -265,11 +288,12 @@ There is no balance operation or balance-gated enrollment in this client.
   `GetTickTransactions`. Missing initial tick and duration use the conservative
   epoch fallback and 1,000 ms.
 
-QubicLightNode verifies tick quorum and transaction signatures locally, but an
-ordinary contract-function RPC returns one accepted peer response. The client
-uses that single response directly, as it does for RPC and Bob. For
-QubicLightNode this is peer-trusted data, not cryptographic authentication or a
-Qubic consensus proof.
+QubicLightNode verifies transaction signatures locally, but tick status comes
+from one structurally valid `BroadcastTick` or `RespondCurrentTickInfo` message
+without signature or quorum authentication. An ordinary contract-function RPC
+likewise returns one accepted peer response. The client uses these responses
+directly, as it does for RPC and Bob. For QubicLightNode they are peer-trusted
+data, not cryptographic authentication or a Qubic consensus proof.
 
 ## Failure and security model
 
@@ -282,10 +306,12 @@ Qubic consensus proof.
   appears as fresh status absence and follows the normal fresh-chain restart.
 - Seeds, preimages, signed bytes, credentials, query parameters, and fragments
   must never appear in logs, errors, `Debug`, or persisted runtime state.
-- Exactly one process may write a given identity/tier. A competing writer can
-  only be detected after its target appears in the selected backend's provider-
-  status response; QubicLightNode obtains that contract output from one
-  peer-trusted response.
+- Exactly one process may write a given identity/tier. A foreign target from a
+  competing writer is detected in the selected backend's provider-status
+  response. `GetProviderStatus` cannot distinguish two writers that target the
+  same stream tick; that conflict is detected only after a later foreign update
+  or disappearance. QubicLightNode obtains the contract output from one peer-
+  trusted response.
 - Six-tick early broadcast exposes reveal material to the selected backend.
   This is an explicit availability/confidentiality tradeoff.
 

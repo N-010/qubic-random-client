@@ -56,6 +56,8 @@ struct PlannedCall {
 struct Chain {
     first_target: u32,
     last_target: u32,
+    confirmed_through: Option<u32>,
+    confirmation_lag: Option<ConfirmationLag>,
     outstanding_preimage: Box<[u8; 512]>,
     calls: VecDeque<PlannedCall>,
 }
@@ -66,6 +68,21 @@ impl Chain {
             && target <= self.last_target
             && (target - self.first_target).is_multiple_of(STREAM_COUNT)
     }
+
+    fn latest_target_before(&self, tick: u32) -> Option<u32> {
+        let upper_bound = tick.checked_sub(1)?.min(self.last_target);
+        let distance = upper_bound.checked_sub(self.first_target)?;
+        let offset = distance
+            .checked_div(STREAM_COUNT)?
+            .checked_mul(STREAM_COUNT)?;
+        self.first_target.checked_add(offset)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfirmationLag {
+    missing_target: u32,
+    first_requested_tick: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +108,12 @@ enum SlotState {
         first_target: u32,
     },
     Active,
+    Restarting {
+        frozen_tail: u32,
+        absence_after_tick: u32,
+        absence_observed: bool,
+        drain_reason: Option<DrainReason>,
+    },
     Draining {
         reason: DrainReason,
         terminal_target: u32,
@@ -314,6 +337,7 @@ impl ProviderEngine {
             self.expire_calls(index, tick.tick);
             self.dispatch_calls(index, tick.tick, tick.tick_duration_ms);
             self.finish_drain(index);
+            self.finish_status_restart(index, tick.tick);
             self.prune_calls(index, tick.tick);
         }
         Ok(())
@@ -464,14 +488,15 @@ impl ProviderEngine {
                         "Stream {} is active at contract tick {}",
                         self.slots[index].key.stream, confirmed_tick
                     ));
+                    self.apply_confirmation_watermark(index, confirmed_tick, observation);
                 }
-                Some(_) => self.lose_chain(
+                Some(_) => self.begin_status_restart(
                     index,
                     observation.requested_tick.saturating_add(1),
                     false,
                     "provider status reports an update outside the local chain",
                 ),
-                None if observation.requested_tick > first_target => self.lose_chain(
+                None if observation.requested_tick > first_target => self.begin_status_restart(
                     index,
                     observation.requested_tick,
                     true,
@@ -480,22 +505,102 @@ impl ProviderEngine {
                 None => {}
             },
             SlotState::Active => match observed_target {
-                Some(confirmed_tick) if self.chain_owns_target(index, confirmed_tick) => {}
-                Some(_) => self.lose_chain(
+                Some(confirmed_tick) if self.chain_owns_target(index, confirmed_tick) => {
+                    self.apply_confirmation_watermark(index, confirmed_tick, observation);
+                }
+                Some(_) => self.begin_status_restart(
                     index,
                     observation.requested_tick.saturating_add(1),
                     false,
                     "provider status reports an update outside the local chain",
                 ),
-                None => self.lose_chain(
+                None => self.begin_status_restart(
                     index,
                     observation.requested_tick,
                     true,
                     "provider status no longer reports the slot",
                 ),
             },
+            SlotState::Restarting {
+                frozen_tail,
+                absence_after_tick,
+                absence_observed: _,
+                drain_reason,
+            } => match observed_target {
+                None if observation.requested_tick >= absence_after_tick => {
+                    self.slots[index].state = SlotState::Restarting {
+                        frozen_tail,
+                        absence_after_tick,
+                        absence_observed: true,
+                        drain_reason,
+                    };
+                }
+                None => {}
+                Some(_) => {
+                    self.slots[index].state = SlotState::Restarting {
+                        frozen_tail,
+                        absence_after_tick: observation.requested_tick.saturating_add(1),
+                        absence_observed: false,
+                        drain_reason,
+                    };
+                }
+            },
             SlotState::Draining { .. } | SlotState::Drained(_) => unreachable!(),
         }
+    }
+
+    fn apply_confirmation_watermark(
+        &mut self,
+        index: usize,
+        confirmed_tick: u32,
+        observation: &StatusObservation,
+    ) {
+        let Some(chain) = self.slots[index].chain.as_mut() else {
+            return;
+        };
+        if chain
+            .confirmed_through
+            .is_some_and(|previous| confirmed_tick < previous)
+        {
+            return;
+        }
+
+        let advanced = chain.confirmed_through != Some(confirmed_tick);
+        if advanced {
+            chain.confirmed_through = Some(confirmed_tick);
+            chain.confirmation_lag = None;
+        }
+        let Some(latest_due) = chain.latest_target_before(observation.requested_tick) else {
+            chain.confirmation_lag = None;
+            return;
+        };
+        if confirmed_tick >= latest_due {
+            chain.confirmation_lag = None;
+            return;
+        }
+        let Some(missing_target) = confirmed_tick.checked_add(STREAM_COUNT) else {
+            return;
+        };
+        let lag = ConfirmationLag {
+            missing_target,
+            first_requested_tick: observation.requested_tick,
+        };
+        if advanced
+            || chain.confirmation_lag.is_none_or(|previous| {
+                previous.missing_target != missing_target
+                    || observation.requested_tick <= previous.first_requested_tick
+            })
+        {
+            chain.confirmation_lag = Some(lag);
+            return;
+        }
+
+        self.begin_status_restart(
+            index,
+            observation.requested_tick.saturating_add(1),
+            false,
+            &format!("contract status did not advance through signed tick {missing_target}"),
+        );
     }
 
     fn chain_owns_target(&self, index: usize, target: u32) -> bool {
@@ -503,6 +608,44 @@ impl ProviderEngine {
             .chain
             .as_ref()
             .is_some_and(|chain| chain.owns_target(target))
+    }
+
+    fn begin_status_restart(
+        &mut self,
+        index: usize,
+        absence_after_tick: u32,
+        absence_observed: bool,
+        reason: &str,
+    ) {
+        let Some(frozen_tail) = self.slots[index]
+            .chain
+            .as_ref()
+            .map(|chain| chain.last_target)
+        else {
+            return;
+        };
+        let Some(restart_at) = frozen_tail.checked_add(STREAM_COUNT) else {
+            abort_chain(self.slots[index].chain.take());
+            self.slots[index].restart_at = u32::MAX;
+            self.slots[index].state = SlotState::Drained(DrainOutcome::Failed);
+            console::log_warn(format!(
+                "Stream {} has no future restart tick in this epoch",
+                self.slots[index].key.stream
+            ));
+            return;
+        };
+
+        self.slots[index].restart_at = restart_at;
+        self.slots[index].state = SlotState::Restarting {
+            frozen_tail,
+            absence_after_tick,
+            absence_observed,
+            drain_reason: None,
+        };
+        console::log_warn(format!(
+            "Stream {} froze its signed tail at tick {frozen_tail}: {reason}",
+            self.slots[index].key.stream
+        ));
     }
 
     fn lose_chain(
@@ -560,6 +703,8 @@ impl ProviderEngine {
         self.slots[index].chain = Some(Chain {
             first_target: target,
             last_target: target,
+            confirmed_through: None,
+            confirmation_lag: None,
             outstanding_preimage: Box::new(next_preimage),
             calls: VecDeque::from([PlannedCall {
                 target_tick: target,
@@ -628,6 +773,25 @@ impl ProviderEngine {
                 self.slots[index].state = SlotState::Drained(DrainOutcome::NothingToDrain);
                 return Ok(());
             }
+            SlotState::Restarting {
+                frozen_tail,
+                absence_after_tick,
+                absence_observed,
+                drain_reason,
+            } => {
+                let drain_reason = match (drain_reason, reason) {
+                    (_, DrainReason::Shutdown) => DrainReason::Shutdown,
+                    (Some(DrainReason::Shutdown), DrainReason::Epoch) => DrainReason::Shutdown,
+                    (Some(DrainReason::Epoch) | None, DrainReason::Epoch) => DrainReason::Epoch,
+                };
+                self.slots[index].state = SlotState::Restarting {
+                    frozen_tail,
+                    absence_after_tick,
+                    absence_observed,
+                    drain_reason: Some(drain_reason),
+                };
+                return Ok(());
+            }
             SlotState::Starting { .. } | SlotState::Active => {}
         }
 
@@ -667,35 +831,34 @@ impl ProviderEngine {
     }
 
     fn expire_calls(&mut self, index: usize, current_tick: u32) {
-        let expired = self.slots[index].chain.as_ref().is_some_and(|chain| {
-            chain.calls.iter().any(|call| {
-                current_tick >= call.target_tick && call.state != BroadcastState::Accepted
-            })
-        });
-        if !expired {
-            return;
+        let mut expired = false;
+        let mut failed_normal_calls = 0;
+        if let Some(chain) = self.slots[index].chain.as_mut() {
+            for call in &mut chain.calls {
+                if current_tick < call.target_tick
+                    || matches!(
+                        call.state,
+                        BroadcastState::Accepted | BroadcastState::Failed
+                    )
+                {
+                    continue;
+                }
+                if let Some(task) = call.broadcast.take() {
+                    task.abort();
+                }
+                if call.kind == CallKind::RevealAndCommit {
+                    failed_normal_calls += 1;
+                }
+                call.state = BroadcastState::Failed;
+                expired = true;
+            }
         }
-        let failed_normal_calls = self.slots[index].chain.as_ref().map_or(0, |chain| {
-            chain
-                .calls
-                .iter()
-                .filter(|call| {
-                    call.kind == CallKind::RevealAndCommit
-                        && current_tick >= call.target_tick
-                        && call.state != BroadcastState::Accepted
-                })
-                .count()
-        });
         if failed_normal_calls > 0 {
             self.send_stats.record_failed(failed_normal_calls);
             self.send_stats.publish();
         }
-        if let Some(chain) = self.slots[index].chain.as_mut() {
-            for call in &mut chain.calls {
-                if let Some(task) = call.broadcast.take() {
-                    task.abort();
-                }
-            }
+        if !expired {
+            return;
         }
         match self.slots[index].state {
             SlotState::Starting { .. } | SlotState::Active => self.lose_chain(
@@ -704,6 +867,7 @@ impl ProviderEngine {
                 false,
                 "a required target tick expired before backend acceptance",
             ),
+            SlotState::Restarting { .. } => {}
             SlotState::Draining { .. } => self.complete_drain(index, DrainOutcome::Failed),
             SlotState::Waiting { .. } | SlotState::Drained(_) => {}
         }
@@ -906,6 +1070,39 @@ impl ProviderEngine {
         self.slots[index].state = SlotState::Drained(outcome);
     }
 
+    fn finish_status_restart(&mut self, index: usize, current_tick: u32) {
+        let SlotState::Restarting {
+            frozen_tail,
+            absence_after_tick,
+            absence_observed,
+            drain_reason,
+        } = self.slots[index].state
+        else {
+            return;
+        };
+        if current_tick < frozen_tail {
+            return;
+        }
+
+        abort_chain(self.slots[index].chain.take());
+        if drain_reason.is_some() {
+            self.slots[index].state = SlotState::Drained(DrainOutcome::NothingToDrain);
+            console::log_warn(format!(
+                "Stream {} finished its untrusted signed tail without a terminal reveal",
+                self.slots[index].key.stream
+            ));
+        } else {
+            self.slots[index].state = SlotState::Waiting {
+                absence_after_tick,
+                absence_observed,
+            };
+            console::log_info(format!(
+                "Stream {} finished its frozen tail and is waiting for exact absence",
+                self.slots[index].key.stream
+            ));
+        }
+    }
+
     fn prune_calls(&mut self, index: usize, current_tick: u32) {
         if matches!(self.slots[index].state, SlotState::Draining { .. }) {
             return;
@@ -1093,6 +1290,7 @@ mod tests {
     use chrono::{TimeDelta, TimeZone as _};
 
     use super::*;
+    use crate::contract::ProviderSlot;
 
     #[derive(Default)]
     struct MockBackend {
@@ -1179,6 +1377,48 @@ mod tests {
         }
     }
 
+    fn owned_status(
+        engine: &ProviderEngine,
+        index: usize,
+        requested_tick: u32,
+        last_update_tick: u32,
+    ) -> StatusObservation {
+        StatusObservation {
+            epoch: 1,
+            requested_tick,
+            status: ProviderStatus {
+                slots: vec![ProviderSlot {
+                    key: engine.slots[index].key,
+                    locked_collateral: engine.collateral,
+                    contributed_to_entropy: false,
+                    last_update_tick,
+                }],
+            },
+        }
+    }
+
+    fn prepare_active_tail(engine: &mut ProviderEngine, index: usize) -> (u32, u32) {
+        observe_absence(engine, index, 99);
+        engine.start_if_ready(index, 100).expect("start chain");
+        let first_target = engine.slots[index]
+            .chain
+            .as_ref()
+            .expect("chain")
+            .first_target;
+        engine
+            .extend_chain(index, first_target)
+            .expect("extend signed tail");
+        let observation = owned_status(engine, index, first_target + 1, first_target);
+        engine.apply_status(index, &observation);
+        assert_eq!(engine.slots[index].state, SlotState::Active);
+        let last_target = engine.slots[index]
+            .chain
+            .as_ref()
+            .expect("chain")
+            .last_target;
+        (first_target, last_target)
+    }
+
     fn observe_absence(engine: &mut ProviderEngine, index: usize, requested_tick: u32) {
         engine.apply_status(index, &empty_status(requested_tick));
         assert!(matches!(
@@ -1216,7 +1456,16 @@ mod tests {
         );
 
         engine.apply_status(0, &empty_status(109));
-        engine.start_if_ready(0, 110).expect("restart chain");
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting {
+                frozen_tail: 111,
+                absence_observed: true,
+                ..
+            }
+        ));
+        engine.finish_status_restart(0, 111);
+        engine.start_if_ready(0, 111).expect("restart chain");
         assert_eq!(
             engine.slots[0]
                 .chain
@@ -1224,6 +1473,164 @@ mod tests {
                 .expect("new chain")
                 .first_target,
             117
+        );
+    }
+
+    #[test]
+    fn lagging_local_status_requires_two_fresh_observations() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, frozen_tail) = prepare_active_tail(&mut engine, 0);
+
+        let first_lag = owned_status(&engine, 0, first_target + 4, first_target);
+        engine.apply_status(0, &first_lag);
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+        assert_eq!(
+            engine.slots[0]
+                .chain
+                .as_ref()
+                .expect("chain")
+                .confirmation_lag,
+            Some(ConfirmationLag {
+                missing_target: first_target + STREAM_COUNT,
+                first_requested_tick: first_target + 4,
+            })
+        );
+
+        engine.apply_status(0, &first_lag);
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+
+        let second_lag = owned_status(&engine, 0, first_target + 5, first_target);
+        engine.apply_status(0, &second_lag);
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting {
+                frozen_tail: tail,
+                absence_observed: false,
+                ..
+            } if tail == frozen_tail
+        ));
+    }
+
+    #[test]
+    fn advancing_status_clears_lag_and_stale_regression_is_ignored() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, _) = prepare_active_tail(&mut engine, 0);
+
+        let lag = owned_status(&engine, 0, first_target + 4, first_target);
+        engine.apply_status(0, &lag);
+        let advanced = owned_status(&engine, 0, first_target + 5, first_target + STREAM_COUNT);
+        engine.apply_status(0, &advanced);
+        let stale = owned_status(&engine, 0, first_target + 6, first_target);
+        engine.apply_status(0, &stale);
+
+        let chain = engine.slots[0].chain.as_ref().expect("chain");
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+        assert_eq!(chain.confirmed_through, Some(first_target + STREAM_COUNT));
+        assert_eq!(chain.confirmation_lag, None);
+    }
+
+    #[tokio::test]
+    async fn frozen_status_tail_is_sent_before_fresh_first_commit() {
+        let backend = Arc::new(MockBackend::default());
+        let mut engine = engine(Arc::clone(&backend));
+        let (first_target, frozen_tail) = prepare_active_tail(&mut engine, 1);
+        let first_lag = owned_status(&engine, 1, first_target + 4, first_target);
+        engine.apply_status(1, &first_lag);
+        let second_lag = owned_status(&engine, 1, first_target + 5, first_target);
+        engine.apply_status(1, &second_lag);
+
+        let signed_call_count = engine.slots[1].chain.as_ref().expect("chain").calls.len();
+        engine
+            .extend_chain(1, frozen_tail)
+            .expect("restart state ignores extension");
+        assert_eq!(
+            engine.slots[1].chain.as_ref().expect("chain").calls.len(),
+            signed_call_count
+        );
+
+        for call in &mut engine.slots[1].chain.as_mut().expect("chain").calls {
+            if call.target_tick < frozen_tail {
+                call.state = BroadcastState::Accepted;
+            }
+        }
+        engine.dispatch_calls(1, frozen_tail - 1, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        assert_eq!(backend.broadcasts.lock().expect("broadcast lock").len(), 1);
+
+        engine.apply_status(1, &empty_status(frozen_tail));
+        engine.finish_status_restart(1, frozen_tail);
+        assert!(matches!(
+            engine.slots[1].state,
+            SlotState::Waiting {
+                absence_observed: true,
+                ..
+            }
+        ));
+        engine
+            .start_if_ready(1, frozen_tail)
+            .expect("fresh first commit");
+        let replacement = engine.slots[1].chain.as_ref().expect("new chain");
+        assert!(replacement.first_target >= frozen_tail + SEND_LEAD_TICKS);
+        assert_eq!(replacement.first_target % STREAM_COUNT, 1);
+        assert_eq!(replacement.calls[0].kind, CallKind::FirstCommit);
+        assert!(
+            replacement
+                .calls
+                .iter()
+                .all(|call| call.kind != CallKind::TerminalReveal)
+        );
+    }
+
+    #[test]
+    fn expiry_during_status_restart_preserves_the_later_signed_tail() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, frozen_tail) = prepare_active_tail(&mut engine, 0);
+        let first_lag = owned_status(&engine, 0, first_target + 4, first_target);
+        engine.apply_status(0, &first_lag);
+        let second_lag = owned_status(&engine, 0, first_target + 5, first_target);
+        engine.apply_status(0, &second_lag);
+
+        engine.expire_calls(0, first_target + STREAM_COUNT);
+
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting {
+                frozen_tail: tail,
+                ..
+            } if tail == frozen_tail
+        ));
+        let chain = engine.slots[0].chain.as_ref().expect("chain");
+        assert!(chain.calls.iter().any(|call| {
+            call.target_tick == frozen_tail && call.state == BroadcastState::Ready
+        }));
+        assert_eq!(engine.send_stats.failed, 1);
+    }
+
+    #[test]
+    fn drain_during_status_restart_never_adds_terminal_reveal() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, frozen_tail) = prepare_active_tail(&mut engine, 2);
+        let first_lag = owned_status(&engine, 2, first_target + 4, first_target);
+        engine.apply_status(2, &first_lag);
+        let second_lag = owned_status(&engine, 2, first_target + 5, first_target);
+        engine.apply_status(2, &second_lag);
+
+        engine
+            .enter_drain(2, DrainReason::Shutdown)
+            .expect("record shutdown drain");
+        assert!(
+            engine.slots[2]
+                .chain
+                .as_ref()
+                .expect("chain")
+                .calls
+                .iter()
+                .all(|call| call.kind != CallKind::TerminalReveal)
+        );
+        engine.finish_status_restart(2, frozen_tail);
+        assert_eq!(
+            engine.slots[2].state,
+            SlotState::Drained(DrainOutcome::NothingToDrain)
         );
     }
 
@@ -1548,6 +1955,40 @@ mod tests {
             boundary - TimeDelta::seconds(600),
         );
         assert_eq!(engine.epoch_phase, Some(EpochPhase::Draining { epoch: 9 }));
+    }
+
+    #[test]
+    fn epoch_change_discards_status_restart_state() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, _) = prepare_active_tail(&mut engine, 0);
+        let first_lag = owned_status(&engine, 0, first_target + 4, first_target);
+        engine.apply_status(0, &first_lag);
+        let second_lag = owned_status(&engine, 0, first_target + 5, first_target);
+        engine.apply_status(0, &second_lag);
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting { .. }
+        ));
+
+        let monday = Utc.with_ymd_and_hms(2026, 8, 3, 0, 0, 0).unwrap();
+        engine.update_epoch_phase(
+            &TickInfo {
+                epoch: 10,
+                tick: 200,
+                initial_tick: 200,
+                tick_duration_ms: 1_000,
+            },
+            monday,
+        );
+
+        assert!(engine.slots[0].chain.is_none());
+        assert_eq!(
+            engine.slots[0].state,
+            SlotState::Waiting {
+                absence_after_tick: 0,
+                absence_observed: false,
+            }
+        );
     }
 
     #[test]
