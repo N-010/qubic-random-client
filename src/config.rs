@@ -8,6 +8,8 @@ const DEFAULT_RPC_ENDPOINT: &str = "https://rpc.qubic.org";
 const DEFAULT_BOB_ENDPOINT: &str = scapi::bob::DEFAULT_BOB_RPC_ENDPOINT;
 const DEFAULT_GRPC_ENDPOINT: &str = "http://127.0.0.1:50051";
 const DEFAULT_COLLATERAL: u64 = 10_000;
+const DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS: u64 = 600;
+const DEFAULT_REVEAL_CHECK_DELAY_TICKS: u32 = 10;
 const DEFAULT_EPOCH_STOP_LEAD_TIME_SECS: u64 = 600;
 const DEFAULT_EPOCH_RESUME_DELAY_TICKS: u32 = 50;
 
@@ -61,6 +63,20 @@ struct Cli {
     collateral: u64,
 
     #[arg(
+        long = "empty-check-ms",
+        default_value_t = DEFAULT_EMPTY_TICK_CHECK_INTERVAL_MS,
+        value_parser = parse_positive_u64
+    )]
+    empty_tick_check_interval_ms: u64,
+
+    #[arg(
+        long = "reveal-verify-after",
+        default_value_t = DEFAULT_REVEAL_CHECK_DELAY_TICKS,
+        value_parser = parse_positive_u32
+    )]
+    reveal_check_delay_ticks: u32,
+
+    #[arg(
         long = "stop-before-epoch-end-secs",
         default_value_t = DEFAULT_EPOCH_STOP_LEAD_TIME_SECS
     )]
@@ -78,6 +94,8 @@ pub struct AppConfig {
     pub backend: BackendKind,
     pub endpoint: String,
     pub collateral: u64,
+    pub empty_tick_check_interval_ms: u64,
+    pub reveal_check_delay_ticks: u32,
     pub epoch_stop_lead_time_secs: u64,
     pub epoch_resume_delay_ticks: u32,
 }
@@ -89,6 +107,11 @@ impl fmt::Debug for AppConfig {
             .field("backend", &self.backend)
             .field("endpoint", &redacted_endpoint(&self.endpoint))
             .field("collateral", &self.collateral)
+            .field(
+                "empty_tick_check_interval_ms",
+                &self.empty_tick_check_interval_ms,
+            )
+            .field("reveal_check_delay_ticks", &self.reveal_check_delay_ticks)
             .field("epoch_stop_lead_time_secs", &self.epoch_stop_lead_time_secs)
             .field("epoch_resume_delay_ticks", &self.epoch_resume_delay_ticks)
             .finish()
@@ -114,10 +137,34 @@ impl AppConfig {
             backend: cli.backend,
             endpoint,
             collateral: cli.collateral,
+            empty_tick_check_interval_ms: cli.empty_tick_check_interval_ms,
+            reveal_check_delay_ticks: cli.reveal_check_delay_ticks,
             epoch_stop_lead_time_secs: cli.epoch_stop_lead_time_secs,
             epoch_resume_delay_ticks: cli.epoch_resume_delay_ticks,
         })
     }
+}
+
+fn parse_positive_u64(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|err| format!("invalid positive integer: {err}"))
+        .and_then(|value| {
+            (value > 0)
+                .then_some(value)
+                .ok_or_else(|| "value must be greater than zero".to_string())
+        })
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|err| format!("invalid positive integer: {err}"))
+        .and_then(|value| {
+            (value > 0)
+                .then_some(value)
+                .ok_or_else(|| "value must be greater than zero".to_string())
+        })
 }
 
 pub struct Seed(LockedSeed);
@@ -306,6 +353,31 @@ mod tests {
         assert!(validate_collateral(1_000_000_000).is_ok());
         assert!(validate_collateral(0).is_err());
         assert!(validate_collateral(11).is_err());
+    }
+
+    #[test]
+    fn monitoring_options_have_stable_defaults_and_reject_zero() {
+        use clap::Parser as _;
+
+        let seed = "a".repeat(55);
+        let cli = Cli::try_parse_from(["random-client", "--seed", &seed]).expect("defaults");
+        assert_eq!(cli.empty_tick_check_interval_ms, 600);
+        assert_eq!(cli.reveal_check_delay_ticks, 10);
+
+        assert!(
+            Cli::try_parse_from(["random-client", "--seed", &seed, "--empty-check-ms", "0",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "random-client",
+                "--seed",
+                &seed,
+                "--reveal-verify-after",
+                "0",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

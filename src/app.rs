@@ -22,6 +22,8 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         config.collateral,
         config.epoch_stop_lead_time_secs,
         config.epoch_resume_delay_ticks,
+        config.empty_tick_check_interval_ms,
+        config.reveal_check_delay_ticks,
     );
     drop(config.seed);
     engine.run(wait_for_shutdown_signal()).await

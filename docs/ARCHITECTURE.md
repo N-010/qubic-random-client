@@ -35,13 +35,13 @@ randomness, protected seed memory, time, standard input, and shutdown signals.
 | --- | --- |
 | `src/main.rs` | Enter Tokio, parse configuration, and expose the process result. |
 | `src/app.rs` | Construct wallet, backend, and engine; translate OS signals into graceful shutdown. |
-| `src/config.rs` | Parse CLI input, normalize endpoints, validate collateral, and keep the seed locked and zeroized. |
-| `src/backend.rs` | Define the transport-neutral port and adapt RPC, Bob, and gRPC. |
+| `src/config.rs` | Parse CLI input, normalize endpoints, validate collateral and monitoring intervals, and keep the seed locked and zeroized. |
+| `src/backend.rs` | Define the transport-neutral port and adapt RPC, Bob, and gRPC, including delayed tick-data checks. |
 | `src/bob.rs` | Decode Bob's varying JSON response shapes. |
 | `src/contract.rs` | Own Random constants and strict wire codecs. |
 | `src/entropy.rs` | Generate 4096-bit preimages and KangarooTwelve commitments. |
-| `src/engine.rs` | Own three stream states, tick scheduling, status-driven restart, retries, epoch lifecycle, and drains. |
-| `src/console.rs` | Format small, non-sensitive runtime logs. |
+| `src/engine.rs` | Own three stream states, tick scheduling, status-driven restart, retries, delivery counters, tick-data verification, epoch lifecycle, and drains. |
+| `src/console.rs` | Format small, non-sensitive runtime logs and the current delivery-counter snapshot. |
 | `proto/lightnode.proto` / `build.rs` | Define and generate the minimal QubicLightNode client. |
 
 The project stays flat and small. `NetworkBackend` is the only operational
@@ -52,7 +52,8 @@ construction and signing, and the existing RPC and Bob clients.
 ## Startup flow
 
 1. Configuration accepts a 55-character lowercase seed, one backend, an
-   endpoint, a collateral tier, and the two epoch window settings.
+   endpoint, a collateral tier, two monitoring settings, and the two epoch
+   window settings.
 2. A seed omitted from CLI is read without echo or from redirected stdin. Seed
    bytes are locked, redacted from `Debug`, zeroized, and startup fails if
    memory locking fails.
@@ -73,20 +74,21 @@ The engine wakes every 500 ms:
 
 1. Fetch tick metadata. Failure aborts only this cycle and is retried.
 2. Update epoch/warmup/drain phase from epoch number, initial tick, and UTC time.
-3. Harvest the previous provider-status query and start at most one next query.
-4. Harvest independent broadcast tasks.
-5. Apply a fresh status observation to each exact `(stream, tier)` state.
-6. While active, start eligible absent streams and extend known chains.
-7. During pre-epoch drain or shutdown, freeze normal planning and schedule safe
+3. Harvest the previous delayed tick-data check and start at most one due check.
+4. Harvest the previous provider-status query and start at most one next query.
+5. Harvest independent broadcast tasks.
+6. Apply a fresh status observation to each exact `(stream, tier)` state.
+7. While active, start eligible absent streams and extend known chains.
+8. During pre-epoch drain or shutdown, freeze normal planning and schedule safe
    terminal reveals.
-8. Expire missed calls, dispatch eligible calls, finish drains, and prune old
+9. Expire missed calls, dispatch eligible calls, finish drains, and prune old
    accepted calls.
 
-Status and transaction broadcasts are separate bounded Tokio tasks. A slow or
-failed request does not serialize the other streams. The engine aborts its
-status and broadcast tasks on reset and all owned tasks on drop. A
-cancellation-safe shutdown observer remains active while tick calls are
-awaited.
+Status, transaction broadcasts, and the single delayed tick-data check are
+separate bounded Tokio tasks. A slow or failed request does not serialize the
+other streams. The engine aborts its status, broadcast, and tick-data tasks on
+reset and all owned tasks on drop. A cancellation-safe shutdown observer
+remains active while tick calls are awaited.
 
 ## Contract and scheduling invariants
 
@@ -121,6 +123,36 @@ reaches the contract twice in the target tick, `Random.h` rejects the second
 normal reveal through its same-tick flag and rejects the second first commit
 because the provider is already present; both paths refund and return without
 another state mutation.
+
+## Delivery counters and empty-tick monitoring
+
+The engine keeps cumulative process-lifetime counters for normal
+`reveal + commit` targets only. First commits and terminal reveals are excluded.
+Each target has one delivery outcome: temporary broadcast errors do not count;
+backend acceptance increments `ok`, while reaching the immutable target
+without acceptance increments `failed` once.
+
+An accepted normal target is queued once for a delayed check. By default the
+check becomes eligible after 10 ticks and at most one check is active; the scan
+interval defaults to 600 ms. `--reveal-verify-after` and `--empty-check-ms`
+configure positive values. A backend error or timeout requeues the check without
+changing counters. A non-empty result preserves `ok`; an empty result moves one
+outcome from `ok` to `empty`.
+
+Empty means that the selected backend reports no data or transactions for the
+target tick as a whole. It does not prove whether this client's transaction
+executed. RPC uses tick data, Bob uses the single-tick transfers response, and
+QubicLightNode uses `GetTickTransactions`. Pending checks are discarded on an
+epoch reset or process drop, already counted acceptance remains `ok`, and
+monitoring never delays drain or graceful shutdown. The three counters remain
+cumulative across epoch changes and are appended to logs after the first
+outcome.
+
+The QubicLightNode response is derived from an exact-size Core `TickData` only
+after validation of the requested tick, designated leader, unique non-zero
+digest set, active arbitrator-authenticated computor key, K12 digest, and FourQ
+signature. Missing authentication state is an unavailable observation, not an
+empty tick.
 
 ## Stream state machine
 
@@ -168,11 +200,11 @@ The wall-clock boundary is Wednesday 12:00 UTC. By default, the engine enters
 pre-epoch drain during the final 600 seconds. The lead is configured by
 `--stop-before-epoch-end-secs`.
 
-When the backend reports a new epoch number, all previous-epoch queries,
-broadcast tasks, signed transactions, and preimages are discarded. Every
-stream returns to `Waiting` and requires a new status observation. Enrollment
-is paused until `initial_tick + 50` by default, configurable with
-`--resume-after-epoch-start-ticks`.
+When the backend reports a new epoch number, all previous-epoch status and
+tick-data queries, broadcast tasks, signed transactions, and preimages are
+discarded. Every stream returns to `Waiting` and requires a new status
+observation. Enrollment is paused until `initial_tick + 50` by default,
+configurable with `--resume-after-epoch-start-ticks`.
 
 QubicLightNode `HEAD` does not expose the epoch's initial tick. Its adapter uses
 the first verified-quorum tick observed in that epoch as a conservative local
@@ -215,21 +247,23 @@ second terminal transaction.
 
 ## Backend boundary
 
-Every backend implements only three operations:
+Every backend implements only four operations:
 
 - obtain epoch/current/initial tick and normalized tick duration;
+- report whether one historical tick contains data or transactions;
 - query a contract function with raw input/output bytes;
 - broadcast exact signed transaction bytes and return a non-empty transaction
   identifier.
 
 There is no balance operation or balance-gated enrollment in this client.
 
-- RPC uses `/live/v1` and base64 contract payloads. A zero tick duration is
-  normalized to 1,000 ms.
-- Bob uses JSON-RPC, tolerant result extraction, monotonic query nonces, and
-  hexadecimal contract payloads.
-- gRPC uses the generated minimal QubicLightNode client and raw bytes. Missing
-  initial tick and duration use the conservative epoch fallback and 1,000 ms.
+- RPC uses `/live/v1`, `/query/v1` for tick data, and base64 contract payloads.
+  A zero tick duration is normalized to 1,000 ms.
+- Bob uses JSON-RPC, tolerant result extraction, single-tick transfer queries,
+  monotonic query nonces, and hexadecimal contract payloads.
+- gRPC uses the generated minimal QubicLightNode client, raw bytes, and
+  `GetTickTransactions`. Missing initial tick and duration use the conservative
+  epoch fallback and 1,000 ms.
 
 QubicLightNode verifies tick quorum and transaction signatures locally, but an
 ordinary contract-function RPC returns one accepted peer response. The client
@@ -239,8 +273,8 @@ Qubic consensus proof.
 
 ## Failure and security model
 
-- Cycle, status, and broadcast failures are logged and retried according to the
-  state rules; unrelated streams continue.
+- Cycle, status, broadcast, and tick-data-check failures are logged and retried
+  according to their state rules; unrelated streams continue.
 - Empty transaction identifiers and malformed contract output are rejected.
 - Target arithmetic is checked or saturating where clamping is intentional;
   overflow never creates a wrapped target.
@@ -249,8 +283,9 @@ Qubic consensus proof.
 - Seeds, preimages, signed bytes, credentials, query parameters, and fragments
   must never appear in logs, errors, `Debug`, or persisted runtime state.
 - Exactly one process may write a given identity/tier. A competing writer can
-  only be detected after its target appears in the selected backend's status
-  response; QubicLightNode status is one peer-trusted response.
+  only be detected after its target appears in the selected backend's provider-
+  status response; QubicLightNode obtains that contract output from one
+  peer-trusted response.
 - Six-tick early broadcast exposes reveal material to the selected backend.
   This is an explicit availability/confidentiality tradeoff.
 

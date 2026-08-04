@@ -5,6 +5,7 @@ struct Status {
     backend: String,
     epoch: Option<u32>,
     tick: Option<u32>,
+    send_stats: Option<(u64, u64, u64)>,
 }
 
 static STATUS: OnceLock<Mutex<Status>> = OnceLock::new();
@@ -27,6 +28,14 @@ pub fn set_tick_value(epoch: u32, tick: u32) {
     {
         status.epoch = Some(epoch);
         status.tick = Some(tick);
+    }
+}
+
+pub fn set_send_stats(ok: u64, failed: u64, empty: u64) {
+    if let Some(status) = STATUS.get()
+        && let Ok(mut status) = status.lock()
+    {
+        status.send_stats = Some((ok, failed, empty));
     }
 }
 
@@ -57,12 +66,15 @@ fn log_with_level(level: &str, message: String) {
 
 fn format_log_line(level: &str, status: &Status, message: &str) -> String {
     let level = colorize_level(level);
-    let mut context = Vec::with_capacity(2);
+    let mut context = Vec::with_capacity(3);
     if !status.backend.is_empty() {
         context.push(status.backend.clone());
     }
     if let (Some(epoch), Some(tick)) = (status.epoch, status.tick) {
         context.push(format!("Epoch {epoch}, tick {tick}"));
+    }
+    if let Some((ok, failed, empty)) = status.send_stats {
+        context.push(format!("Sends: {}", format_send_stats(ok, failed, empty)));
     }
 
     if context.is_empty() {
@@ -70,6 +82,20 @@ fn format_log_line(level: &str, status: &Status, message: &str) -> String {
     } else {
         format!("[{level}] {message} | {}", context.join(" | "))
     }
+}
+
+fn format_send_stats(ok: u64, failed: u64, empty: u64) -> String {
+    let total = ok.saturating_add(failed).saturating_add(empty);
+    if total == 0 {
+        return "0 ok (0.0%), 0 failed (0.0%), 0 empty (0.0%)".to_string();
+    }
+    let total = total as f64;
+    let ok_percent = ok as f64 * 100.0 / total;
+    let failed_percent = failed as f64 * 100.0 / total;
+    let empty_percent = empty as f64 * 100.0 / total;
+    format!(
+        "{ok} ok ({ok_percent:.1}%), {failed} failed ({failed_percent:.1}%), {empty} empty ({empty_percent:.1}%)"
+    )
 }
 
 fn display_backend(value: &str) -> String {
@@ -111,10 +137,25 @@ mod tests {
             backend: "RPC".to_string(),
             epoch: Some(7),
             tick: Some(123),
+            send_stats: None,
         };
         assert_eq!(
             format_log_line("INFO", &status, "hello"),
             "[\u{1b}[32mINFO\u{1b}[0m] hello | RPC | Epoch 7, tick 123"
+        );
+    }
+
+    #[test]
+    fn log_line_contains_send_counters_and_percentages() {
+        let status = Status {
+            backend: "RPC".to_string(),
+            epoch: Some(7),
+            tick: Some(123),
+            send_stats: Some((7, 2, 1)),
+        };
+        assert_eq!(
+            format_log_line("INFO", &status, "hello"),
+            "[\u{1b}[32mINFO\u{1b}[0m] hello | RPC | Epoch 7, tick 123 | Sends: 7 ok (70.0%), 2 failed (20.0%), 1 empty (10.0%)"
         );
     }
 

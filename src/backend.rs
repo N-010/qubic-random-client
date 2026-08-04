@@ -8,7 +8,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use scapi::bob::BobRpcClient;
 use scapi::rpc::post::broadcast_transaction_with;
-use scapi::rpc::{RpcClient, get_tick_info_with};
+use scapi::rpc::{RpcClient, get_tick_data_with, get_tick_info_with};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
@@ -57,6 +57,7 @@ impl std::error::Error for BackendError {}
 #[async_trait]
 pub trait NetworkBackend: Send + Sync {
     async fn tick_info(&self) -> Result<TickInfo, BackendError>;
+    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError>;
     async fn query_contract_function(
         &self,
         request: ContractFunctionRequest,
@@ -75,6 +76,7 @@ pub fn create_backend(config: &AppConfig) -> Result<Arc<dyn NetworkBackend>, Bac
 #[derive(Debug, Clone)]
 struct RpcBackend {
     live: RpcClient,
+    query: RpcClient,
 }
 
 impl RpcBackend {
@@ -82,6 +84,10 @@ impl RpcBackend {
         Self {
             live: RpcClient::with_base_url(Cow::Owned(format!(
                 "{}/live/v1",
+                root.trim_end_matches('/')
+            ))),
+            query: RpcClient::with_base_url(Cow::Owned(format!(
+                "{}/query/v1",
                 root.trim_end_matches('/')
             ))),
         }
@@ -109,6 +115,17 @@ impl NetworkBackend for RpcBackend {
             initial_tick: response.tick_info.initial_tick,
             tick_duration_ms: normalize_rpc_tick_duration_ms(response.tick_info.duration),
         })
+    }
+
+    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError> {
+        get_tick_data_with(&self.query, tick)
+            .await
+            .map(|response| {
+                response
+                    .tick_data
+                    .is_some_and(|tick_data| !tick_data.transaction_hashes.is_empty())
+            })
+            .map_err(|err| BackendError::new(format!("RPC tick-data query failed: {err}")))
     }
 
     async fn query_contract_function(
@@ -197,6 +214,21 @@ impl NetworkBackend for BobBackend {
         })
     }
 
+    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError> {
+        let result = extract_result(
+            self.rpc
+                .qubic_get_transfers(json!({
+                    "identity": "",
+                    "fromTick": tick,
+                    "toTick": tick,
+                }))
+                .await
+                .map_err(|err| BackendError::new(format!("Bob tick-data query failed: {err}")))?,
+        )
+        .map_err(BackendError::new)?;
+        bob_tick_has_transactions(&result)
+    }
+
     async fn query_contract_function(
         &self,
         request: ContractFunctionRequest,
@@ -251,6 +283,20 @@ impl NetworkBackend for BobBackend {
             .or_else(|| extract_string_field(&result, &["transactionId", "txId", "hash", "id"]))
             .ok_or_else(|| BackendError::new("Bob broadcast returned no transaction id"))?;
         validate_transaction_id(transaction_id)
+    }
+}
+
+fn bob_tick_has_transactions(result: &Value) -> Result<bool, BackendError> {
+    match result {
+        Value::Array(transfers) => Ok(!transfers.is_empty()),
+        Value::Object(map) => map
+            .get("transfers")
+            .and_then(Value::as_array)
+            .map(|transfers| !transfers.is_empty())
+            .ok_or_else(|| BackendError::new("Bob transfers response is missing transfers array")),
+        _ => Err(BackendError::new(
+            "Bob transfers response has an unexpected shape",
+        )),
     }
 }
 
@@ -352,6 +398,18 @@ impl NetworkBackend for QlnBackend {
         Ok(normalize_qln_tick_info(status, &mut fallback))
     }
 
+    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError> {
+        let mut client = self.client.clone();
+        let response = client
+            .get_tick_transactions(Request::new(lightnodepb::GetTickTransactionsRequest {
+                tick,
+            }))
+            .await
+            .map_err(|err| BackendError::new(format!("QLN tick-data query failed: {err}")))?
+            .into_inner();
+        qln_tick_has_transactions(response)
+    }
+
     async fn query_contract_function(
         &self,
         request: ContractFunctionRequest,
@@ -390,6 +448,19 @@ impl NetworkBackend for QlnBackend {
         } else {
             Err(BackendError::new("QLN rejected broadcast request"))
         }
+    }
+}
+
+fn qln_tick_has_transactions(
+    response: lightnodepb::GetTickTransactionsResponse,
+) -> Result<bool, BackendError> {
+    if response.ok {
+        Ok(response.has_transactions)
+    } else {
+        Err(BackendError::new(format!(
+            "QLN tick-data query failed: {}",
+            response.error
+        )))
     }
 }
 
@@ -465,6 +536,35 @@ mod tests {
         assert!(validate_transaction_id(String::new()).is_err());
         assert!(validate_transaction_id("   ".to_string()).is_err());
         assert_eq!(validate_transaction_id("abc".to_string()).unwrap(), "abc");
+    }
+
+    #[test]
+    fn bob_tick_data_accepts_array_and_wrapped_shapes() {
+        assert!(!bob_tick_has_transactions(&json!([])).unwrap());
+        assert!(bob_tick_has_transactions(&json!([{"tick": 1}])).unwrap());
+        assert!(!bob_tick_has_transactions(&json!({"transfers": []})).unwrap());
+        assert!(
+            bob_tick_has_transactions(&json!({
+                "transfers": [{"tick": 1}]
+            }))
+            .unwrap()
+        );
+        assert!(bob_tick_has_transactions(&json!({})).is_err());
+    }
+
+    #[test]
+    fn qln_tick_data_distinguishes_empty_non_empty_and_error() {
+        let response =
+            |ok, has_transactions, error: &str| lightnodepb::GetTickTransactionsResponse {
+                ok,
+                tick: 1,
+                has_transactions,
+                error: error.to_string(),
+            };
+
+        assert!(!qln_tick_has_transactions(response(true, false, "")).unwrap());
+        assert!(qln_tick_has_transactions(response(true, true, "")).unwrap());
+        assert!(qln_tick_has_transactions(response(false, false, "unavailable")).is_err());
     }
 
     #[test]
@@ -584,6 +684,44 @@ mod tests {
         assert!(request.contains(r#""inputType":2"#));
         assert!(request.contains(r#""inputSize":3"#));
         assert!(request.contains(r#""requestData":"AQID""#));
+    }
+
+    #[tokio::test]
+    async fn rpc_tick_data_query_uses_query_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            [
+                r#"{"tickData":null}"#,
+                r#"{"tickData":{"tickNumber":123,"epoch":1,"computorIndex":0,"timestamp":"","varStruct":"","timeLock":"","transactionHashes":[],"contractFees":[],"signature":""}}"#,
+                r#"{"tickData":{"tickNumber":123,"epoch":1,"computorIndex":0,"timestamp":"","varStruct":"","timeLock":"","transactionHashes":["abc"],"contractFees":[],"signature":""}}"#,
+            ]
+            .into_iter()
+            .map(|body| {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                request
+            })
+            .collect::<Vec<_>>()
+        });
+        let backend = RpcBackend::new(&format!("http://{address}"));
+
+        assert!(!backend.tick_has_transactions(123).await.unwrap());
+        assert!(!backend.tick_has_transactions(123).await.unwrap());
+        assert!(backend.tick_has_transactions(123).await.unwrap());
+        for request in server.join().unwrap() {
+            assert!(request.starts_with("POST /query/v1/getTickData HTTP/1.1\r\n"));
+            assert!(request.contains(r#""tickNumber":123"#));
+        }
     }
 
     fn read_http_request(stream: &mut impl Read) -> String {

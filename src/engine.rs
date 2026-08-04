@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::future::Future;
 use std::io::{Error as IoError, ErrorKind};
 use std::sync::Arc;
@@ -124,6 +124,39 @@ struct StatusObservation {
     status: ProviderStatus,
 }
 
+struct PendingTickCheck {
+    target_tick: u32,
+    task: NetworkTask<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SendStats {
+    ok: u64,
+    failed: u64,
+    empty: u64,
+}
+
+impl SendStats {
+    fn record_ok(&mut self) {
+        self.ok = self.ok.saturating_add(1);
+    }
+
+    fn record_failed(&mut self, count: usize) {
+        self.failed = self
+            .failed
+            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
+    fn record_empty(&mut self) {
+        self.ok = self.ok.saturating_sub(1);
+        self.empty = self.empty.saturating_add(1);
+    }
+
+    fn publish(self) {
+        console::set_send_stats(self.ok, self.failed, self.empty);
+    }
+}
+
 pub struct ProviderEngine {
     backend: Arc<dyn NetworkBackend>,
     wallet: QubicWallet,
@@ -133,6 +166,12 @@ pub struct ProviderEngine {
     epoch_phase: Option<EpochPhase>,
     epoch_stop_lead_time_secs: u64,
     epoch_resume_delay_ticks: u32,
+    empty_tick_check_interval: Duration,
+    reveal_check_delay_ticks: u32,
+    send_stats: SendStats,
+    pending_tick_checks: BTreeSet<u32>,
+    tick_check: Option<PendingTickCheck>,
+    next_tick_check_at: Instant,
 }
 
 impl ProviderEngine {
@@ -142,6 +181,8 @@ impl ProviderEngine {
         collateral: u64,
         epoch_stop_lead_time_secs: u64,
         epoch_resume_delay_ticks: u32,
+        empty_tick_check_interval_ms: u64,
+        reveal_check_delay_ticks: u32,
     ) -> Self {
         let tier = collateral_tier(collateral);
         Self {
@@ -164,6 +205,12 @@ impl ProviderEngine {
             epoch_phase: None,
             epoch_stop_lead_time_secs,
             epoch_resume_delay_ticks,
+            empty_tick_check_interval: Duration::from_millis(empty_tick_check_interval_ms),
+            reveal_check_delay_ticks,
+            send_stats: SendStats::default(),
+            pending_tick_checks: BTreeSet::new(),
+            tick_check: None,
+            next_tick_check_at: Instant::now(),
         }
     }
 
@@ -224,6 +271,8 @@ impl ProviderEngine {
             .await?;
         console::set_tick_value(tick.epoch, tick.tick);
         self.update_epoch_phase(&tick, Utc::now());
+        self.harvest_tick_check().await;
+        self.ensure_tick_check(tick.tick);
 
         let observation = self.harvest_status_query().await;
         self.ensure_status_query(tick.epoch, tick.tick);
@@ -315,6 +364,11 @@ impl ProviderEngine {
         if let Some(query) = self.status_query.take() {
             query.task.abort();
         }
+        if let Some(check) = self.tick_check.take() {
+            check.task.abort();
+        }
+        self.pending_tick_checks.clear();
+        self.next_tick_check_at = Instant::now();
         for index in 0..self.slots.len() {
             abort_chain(self.slots[index].chain.take());
             self.slots[index].state = SlotState::Waiting {
@@ -621,6 +675,21 @@ impl ProviderEngine {
         if !expired {
             return;
         }
+        let failed_normal_calls = self.slots[index].chain.as_ref().map_or(0, |chain| {
+            chain
+                .calls
+                .iter()
+                .filter(|call| {
+                    call.kind == CallKind::RevealAndCommit
+                        && current_tick >= call.target_tick
+                        && call.state != BroadcastState::Accepted
+                })
+                .count()
+        });
+        if failed_normal_calls > 0 {
+            self.send_stats.record_failed(failed_normal_calls);
+            self.send_stats.publish();
+        }
         if let Some(chain) = self.slots[index].chain.as_mut() {
             for call in &mut chain.calls {
                 if let Some(task) = call.broadcast.take() {
@@ -712,6 +781,8 @@ impl ProviderEngine {
                 ..
             }
         );
+        let stats = &mut self.send_stats;
+        let pending_tick_checks = &mut self.pending_tick_checks;
         let Some(chain) = self.slots[index].chain.as_mut() else {
             return;
         };
@@ -725,6 +796,11 @@ impl ProviderEngine {
             match join_network_task(task).await {
                 Ok(tx_id) => {
                     call.state = BroadcastState::Accepted;
+                    if call.kind == CallKind::RevealAndCommit {
+                        stats.record_ok();
+                        stats.publish();
+                        pending_tick_checks.insert(call.target_tick);
+                    }
                     console::log_info(format!(
                         "Backend accepted transaction {} for stream {} tick {}",
                         console::shorten_id(&tx_id),
@@ -745,6 +821,66 @@ impl ProviderEngine {
                 }
             }
         }
+    }
+
+    async fn harvest_tick_check(&mut self) {
+        if !self
+            .tick_check
+            .as_ref()
+            .is_some_and(|check| check.task.is_finished())
+        {
+            return;
+        }
+        let Some(check) = self.tick_check.take() else {
+            return;
+        };
+        match join_network_task(check.task).await {
+            Ok(true) => console::log_info(format!(
+                "Target tick {} contains transactions",
+                check.target_tick
+            )),
+            Ok(false) => {
+                self.send_stats.record_empty();
+                self.send_stats.publish();
+                console::log_warn(format!("Target tick {} is empty", check.target_tick));
+            }
+            Err(err) => {
+                self.pending_tick_checks.insert(check.target_tick);
+                console::log_warn(format!(
+                    "Could not verify target tick {} yet: {err}",
+                    check.target_tick
+                ));
+            }
+        }
+    }
+
+    fn ensure_tick_check(&mut self, current_tick: u32) {
+        let now = Instant::now();
+        if self.tick_check.is_some() || now < self.next_tick_check_at {
+            return;
+        }
+        let Some(target_tick) = self
+            .pending_tick_checks
+            .iter()
+            .copied()
+            .find(|target_tick| {
+                current_tick >= target_tick.saturating_add(self.reveal_check_delay_ticks)
+            })
+        else {
+            return;
+        };
+        self.pending_tick_checks.remove(&target_tick);
+        let backend = Arc::clone(&self.backend);
+        self.tick_check = Some(PendingTickCheck {
+            target_tick,
+            task: spawn_network_task("query target tick data", async move {
+                backend
+                    .tick_has_transactions(target_tick)
+                    .await
+                    .map_err(|err| err.to_string())
+            }),
+        });
+        self.next_tick_check_at = now + self.empty_tick_check_interval;
     }
 
     fn finish_drain(&mut self, index: usize) {
@@ -837,6 +973,9 @@ impl Drop for ProviderEngine {
     fn drop(&mut self) {
         if let Some(query) = self.status_query.take() {
             query.task.abort();
+        }
+        if let Some(check) = self.tick_check.take() {
+            check.task.abort();
         }
         for slot in &mut self.slots {
             abort_chain(slot.chain.take());
@@ -959,12 +1098,23 @@ mod tests {
     struct MockBackend {
         broadcasts: Mutex<Vec<Vec<u8>>>,
         failures_left: AtomicUsize,
+        tick_checks: AtomicUsize,
+        tick_results: Mutex<VecDeque<Result<bool, BackendError>>>,
     }
 
     #[async_trait]
     impl NetworkBackend for MockBackend {
         async fn tick_info(&self) -> Result<TickInfo, BackendError> {
             Err(BackendError::new("not used"))
+        }
+
+        async fn tick_has_transactions(&self, _tick: u32) -> Result<bool, BackendError> {
+            self.tick_checks.fetch_add(1, Ordering::Relaxed);
+            self.tick_results
+                .lock()
+                .expect("tick results lock")
+                .pop_front()
+                .unwrap_or(Ok(true))
         }
 
         async fn query_contract_function(
@@ -1000,7 +1150,25 @@ mod tests {
             10_000,
             600,
             50,
+            1,
+            1,
         )
+    }
+
+    fn prepare_normal_call(engine: &mut ProviderEngine, index: usize) -> u32 {
+        observe_absence(engine, index, 99);
+        engine.start_if_ready(index, 100).expect("start chain");
+        let first_target = engine.slots[index]
+            .chain
+            .as_ref()
+            .expect("chain")
+            .first_target;
+        engine.slots[index].chain.as_mut().expect("chain").calls[0].state =
+            BroadcastState::Accepted;
+        engine
+            .extend_chain(index, first_target.saturating_sub(SEND_LEAD_TICKS - 3))
+            .expect("extend chain");
+        first_target + STREAM_COUNT
     }
 
     fn empty_status(requested_tick: u32) -> StatusObservation {
@@ -1067,6 +1235,7 @@ mod tests {
         let target = engine.slots[0].chain.as_ref().expect("chain").first_target;
 
         engine.expire_calls(0, target);
+        assert_eq!(engine.send_stats, SendStats::default());
         engine.apply_status(0, &empty_status(target));
         assert_eq!(
             engine.slots[0].state,
@@ -1104,6 +1273,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_counts_only_the_final_normal_delivery() {
+        let backend = Arc::new(MockBackend::default());
+        backend.failures_left.store(1, Ordering::Relaxed);
+        let mut engine = engine(Arc::clone(&backend));
+        let target = prepare_normal_call(&mut engine, 1);
+
+        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        assert_eq!(engine.send_stats, SendStats::default());
+
+        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 1,
+                failed: 0,
+                empty: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn expired_normal_target_counts_one_final_failure() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let target = prepare_normal_call(&mut engine, 1);
+
+        engine.expire_calls(1, target);
+
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 0,
+                failed: 1,
+                empty: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn accepted_call_is_never_rebroadcast_at_or_after_target() {
         let backend = Arc::new(MockBackend::default());
         let mut engine = engine(Arc::clone(&backend));
@@ -1122,6 +1331,85 @@ mod tests {
             engine.slots[1].chain.as_ref().expect("chain").calls[0].state,
             BroadcastState::Accepted
         );
+        assert_eq!(engine.send_stats, SendStats::default());
+    }
+
+    #[tokio::test]
+    async fn empty_target_tick_reclassifies_normal_success() {
+        let backend = Arc::new(MockBackend::default());
+        backend
+            .tick_results
+            .lock()
+            .expect("tick results lock")
+            .push_back(Ok(false));
+        let mut engine = engine(Arc::clone(&backend));
+        let target = prepare_normal_call(&mut engine, 1);
+
+        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        engine.ensure_tick_check(target + 1);
+        harvest_tick_check_until_idle(&mut engine).await;
+
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 0,
+                failed: 0,
+                empty: 1,
+            }
+        );
+        assert_eq!(backend.tick_checks.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn target_tick_check_waits_for_the_configured_delay() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        engine.pending_tick_checks.insert(100);
+
+        engine.ensure_tick_check(100);
+        assert!(engine.tick_check.is_none());
+        assert!(engine.pending_tick_checks.contains(&100));
+
+        engine.ensure_tick_check(101);
+        assert_eq!(
+            engine.tick_check.as_ref().map(|check| check.target_tick),
+            Some(100)
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_check_error_retries_without_changing_counts() {
+        let backend = Arc::new(MockBackend::default());
+        backend
+            .tick_results
+            .lock()
+            .expect("tick results lock")
+            .extend([
+                Err(BackendError::new("temporary tick-data failure")),
+                Ok(true),
+            ]);
+        let mut engine = engine(Arc::clone(&backend));
+        let target = prepare_normal_call(&mut engine, 1);
+
+        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        engine.ensure_tick_check(target + 1);
+        harvest_tick_check_until_idle(&mut engine).await;
+        assert_eq!(engine.send_stats.ok, 1);
+        assert!(engine.pending_tick_checks.contains(&target));
+
+        engine.next_tick_check_at = Instant::now();
+        engine.ensure_tick_check(target + 1);
+        harvest_tick_check_until_idle(&mut engine).await;
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 1,
+                failed: 0,
+                empty: 0,
+            }
+        );
+        assert_eq!(backend.tick_checks.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
@@ -1193,6 +1481,7 @@ mod tests {
             engine.slots[1].state,
             SlotState::Drained(DrainOutcome::Accepted)
         );
+        assert_eq!(engine.send_stats, SendStats::default());
     }
 
     #[test]
@@ -1293,5 +1582,16 @@ mod tests {
             }
         }
         panic!("broadcast task did not finish");
+    }
+
+    async fn harvest_tick_check_until_idle(engine: &mut ProviderEngine) {
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            engine.harvest_tick_check().await;
+            if engine.tick_check.is_none() {
+                return;
+            }
+        }
+        panic!("tick check task did not finish");
     }
 }

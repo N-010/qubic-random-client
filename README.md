@@ -28,6 +28,8 @@ or from the first redirected input line.
 --endpoint <URL>
 --collateral <AMOUNT>
 --seed <SEED>
+--empty-check-ms <MILLISECONDS>
+--reveal-verify-after <TICKS>
 --stop-before-epoch-end-secs <SECONDS>
 --resume-after-epoch-start-ticks <TICKS>
 ```
@@ -38,6 +40,8 @@ Defaults:
 - Bob: `http://localhost:40420`
 - gRPC: `http://127.0.0.1:50051`
 - collateral: `10000`
+- empty-tick check interval: 600 ms
+- normal reveal verification delay: 10 ticks
 - pre-epoch drain: 600 seconds before Wednesday 12:00 UTC
 - new-epoch warmup: 50 ticks
 
@@ -61,6 +65,20 @@ and become eligible for broadcast six ticks early. One successful backend
 acceptance completes delivery. A failed delivery is retried with identical
 signed bytes, independently from the other calls and streams. Nothing is
 broadcast at or after its target tick.
+
+Normal `reveal + commit` deliveries are summarized in every subsequent log as
+`Sends: ok / failed / empty`. The counters exclude the first zero-reveal commit
+and terminal drain/shutdown reveals. Retries belong to one target outcome: a
+temporary broadcast error followed by backend acceptance counts only as `ok`,
+while a target that expires without acceptance counts once as `failed`.
+
+After an accepted normal reveal, the client waits 10 ticks by default and asks
+the selected backend whether the target tick contains data or transactions. An
+empty result reclassifies that target from `ok` to `empty`; a check error is
+retried without changing the counters. This checks the tick as a whole and does
+not prove that this client's transaction executed. The interval and delay are
+configurable through `--empty-check-ms` and `--reveal-verify-after`; both must
+be greater than zero. Counters are cumulative for the process lifetime.
 
 The client keeps planning `reveal + commit` calls without waiting for
 `lastUpdateTick` to advance. An older local `lastUpdateTick` does not stop a
@@ -122,6 +140,10 @@ malformed output, or timeout discards the observation while current chains
 continue. This status is peer-trusted data, not cryptographic authentication or
 a Qubic consensus proof. QubicLightNode still verifies tick quorum and
 transaction signatures locally before forwarding transactions.
+`GetTickTransactions` is used only for delayed empty-tick monitoring and does
+not affect provider state or scheduling. QubicLightNode derives its boolean
+result from an exact-size Core `TickData` after checking the requested tick,
+leader, digest set, current-epoch computor key, K12 digest, and FourQ signature.
 
 `compose.yaml` uses the QubicLightNode checkout as its build context:
 

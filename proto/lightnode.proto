@@ -4,6 +4,7 @@ package lightnode;
 
 service LightNode {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc GetTickTransactions(GetTickTransactionsRequest) returns (GetTickTransactionsResponse);
   rpc QueryContractFunction(QueryContractFunctionRequest) returns (QueryContractFunctionResponse);
   rpc BroadcastTransaction(BroadcastTransactionRequest) returns (BroadcastTransactionResponse);
 }
@@ -26,6 +27,18 @@ message GetStatusResponse {
   TickStatus status = 3;
   string warning = 4;
   string error = 5;
+}
+
+message GetTickTransactionsRequest {
+  uint32 tick = 1;
+}
+
+message GetTickTransactionsResponse {
+  bool ok = 1;
+  uint32 tick = 2;
+  // Derived from the transaction-digest array in a FourQ-verified Core TickData.
+  bool has_transactions = 3;
+  string error = 4;
 }
 
 message QueryContractFunctionRequest {
