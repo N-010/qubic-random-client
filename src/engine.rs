@@ -21,6 +21,7 @@ use crate::entropy::{commit_digest, fill_secure_bits};
 
 const STREAM_COUNT: u32 = 3;
 const SEND_LEAD_TICKS: u32 = 6;
+const STATUS_CONFIRMATIONS_REQUIRED: u8 = 3;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const BACKEND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BROADCAST_ATTEMPT: Duration = Duration::from_secs(2);
@@ -57,7 +58,7 @@ struct Chain {
     first_target: u32,
     last_target: u32,
     confirmed_through: Option<u32>,
-    confirmation_lag: Option<ConfirmationLag>,
+    status_suspicion: Option<StatusSuspicion>,
     outstanding_preimage: Box<[u8; 512]>,
     calls: VecDeque<PlannedCall>,
 }
@@ -80,9 +81,78 @@ impl Chain {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ConfirmationLag {
-    missing_target: u32,
+enum StatusEvidence {
+    Absent,
+    Foreign { last_update_tick: u32 },
+    Lag { missing_target: u32 },
+}
+
+impl StatusEvidence {
+    fn agrees_with(self, next: Self) -> bool {
+        match (self, next) {
+            (Self::Absent, Self::Absent) => true,
+            (
+                Self::Foreign {
+                    last_update_tick: previous,
+                },
+                Self::Foreign {
+                    last_update_tick: next,
+                },
+            ) => next >= previous,
+            (
+                Self::Lag {
+                    missing_target: previous,
+                },
+                Self::Lag {
+                    missing_target: next,
+                },
+            ) => next == previous,
+            (Self::Absent, Self::Foreign { .. } | Self::Lag { .. })
+            | (Self::Foreign { .. }, Self::Absent | Self::Lag { .. })
+            | (Self::Lag { .. }, Self::Absent | Self::Foreign { .. }) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatusSuspicion {
+    evidence: StatusEvidence,
+    confirmations: u8,
     first_requested_tick: u32,
+    last_requested_tick: u32,
+}
+
+impl StatusSuspicion {
+    fn new(evidence: StatusEvidence, requested_tick: u32) -> Self {
+        Self {
+            evidence,
+            confirmations: 1,
+            first_requested_tick: requested_tick,
+            last_requested_tick: requested_tick,
+        }
+    }
+
+    fn observe(self, evidence: StatusEvidence, requested_tick: u32) -> Self {
+        if requested_tick <= self.last_requested_tick {
+            return self;
+        }
+        if !self.evidence.agrees_with(evidence) {
+            return Self::new(evidence, requested_tick);
+        }
+        Self {
+            evidence,
+            confirmations: self
+                .confirmations
+                .saturating_add(1)
+                .min(STATUS_CONFIRMATIONS_REQUIRED),
+            first_requested_tick: self.first_requested_tick,
+            last_requested_tick: requested_tick,
+        }
+    }
+
+    fn is_confirmed(self) -> bool {
+        self.confirmations >= STATUS_CONFIRMATIONS_REQUIRED
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,35 +560,32 @@ impl ProviderEngine {
                     ));
                     self.apply_confirmation_watermark(index, confirmed_tick, observation);
                 }
-                Some(_) => self.begin_status_restart(
+                Some(last_update_tick) if observation.requested_tick > first_target => self
+                    .observe_status_evidence(
+                        index,
+                        StatusEvidence::Foreign { last_update_tick },
+                        observation.requested_tick,
+                    ),
+                None if observation.requested_tick > first_target => self.observe_status_evidence(
                     index,
-                    observation.requested_tick.saturating_add(1),
-                    false,
-                    "provider status reports an update outside the local chain",
-                ),
-                None if observation.requested_tick > first_target => self.begin_status_restart(
-                    index,
+                    StatusEvidence::Absent,
                     observation.requested_tick,
-                    true,
-                    "provider status no longer reports the slot",
                 ),
-                None => {}
+                Some(_) | None => {}
             },
             SlotState::Active => match observed_target {
                 Some(confirmed_tick) if self.chain_owns_target(index, confirmed_tick) => {
                     self.apply_confirmation_watermark(index, confirmed_tick, observation);
                 }
-                Some(_) => self.begin_status_restart(
+                Some(last_update_tick) => self.observe_status_evidence(
                     index,
-                    observation.requested_tick.saturating_add(1),
-                    false,
-                    "provider status reports an update outside the local chain",
-                ),
-                None => self.begin_status_restart(
-                    index,
+                    StatusEvidence::Foreign { last_update_tick },
                     observation.requested_tick,
-                    true,
-                    "provider status no longer reports the slot",
+                ),
+                None => self.observe_status_evidence(
+                    index,
+                    StatusEvidence::Absent,
+                    observation.requested_tick,
                 ),
             },
             SlotState::Restarting {
@@ -555,51 +622,93 @@ impl ProviderEngine {
         confirmed_tick: u32,
         observation: &StatusObservation,
     ) {
+        let missing_target = {
+            let Some(chain) = self.slots[index].chain.as_mut() else {
+                return;
+            };
+            if chain
+                .confirmed_through
+                .is_some_and(|previous| confirmed_tick < previous)
+            {
+                return;
+            }
+
+            let advanced = chain.confirmed_through != Some(confirmed_tick);
+            if advanced {
+                chain.confirmed_through = Some(confirmed_tick);
+                chain.status_suspicion = None;
+            }
+            let Some(latest_due) = chain.latest_target_before(observation.requested_tick) else {
+                chain.status_suspicion = None;
+                return;
+            };
+            if confirmed_tick >= latest_due {
+                chain.status_suspicion = None;
+                return;
+            }
+            let Some(missing_target) = confirmed_tick.checked_add(STREAM_COUNT) else {
+                return;
+            };
+            missing_target
+        };
+
+        self.observe_status_evidence(
+            index,
+            StatusEvidence::Lag { missing_target },
+            observation.requested_tick,
+        );
+    }
+
+    fn observe_status_evidence(
+        &mut self,
+        index: usize,
+        evidence: StatusEvidence,
+        requested_tick: u32,
+    ) {
         let Some(chain) = self.slots[index].chain.as_mut() else {
             return;
         };
         if chain
-            .confirmed_through
-            .is_some_and(|previous| confirmed_tick < previous)
+            .status_suspicion
+            .is_some_and(|current| requested_tick <= current.last_requested_tick)
         {
             return;
         }
+        let suspicion = chain.status_suspicion.map_or_else(
+            || StatusSuspicion::new(evidence, requested_tick),
+            |current| current.observe(evidence, requested_tick),
+        );
+        chain.status_suspicion = Some(suspicion);
 
-        let advanced = chain.confirmed_through != Some(confirmed_tick);
-        if advanced {
-            chain.confirmed_through = Some(confirmed_tick);
-            chain.confirmation_lag = None;
-        }
-        let Some(latest_due) = chain.latest_target_before(observation.requested_tick) else {
-            chain.confirmation_lag = None;
-            return;
-        };
-        if confirmed_tick >= latest_due {
-            chain.confirmation_lag = None;
-            return;
-        }
-        let Some(missing_target) = confirmed_tick.checked_add(STREAM_COUNT) else {
-            return;
-        };
-        let lag = ConfirmationLag {
-            missing_target,
-            first_requested_tick: observation.requested_tick,
-        };
-        if advanced
-            || chain.confirmation_lag.is_none_or(|previous| {
-                previous.missing_target != missing_target
-                    || observation.requested_tick <= previous.first_requested_tick
-            })
-        {
-            chain.confirmation_lag = Some(lag);
+        if !suspicion.is_confirmed() {
+            console::log_info(format!(
+                "Stream {} status suspicion {}/{} at request tick {}: {}",
+                self.slots[index].key.stream,
+                suspicion.confirmations,
+                STATUS_CONFIRMATIONS_REQUIRED,
+                requested_tick,
+                status_evidence_description(suspicion.evidence)
+            ));
             return;
         }
 
+        let (absence_after_tick, absence_observed) = match suspicion.evidence {
+            StatusEvidence::Absent => (suspicion.last_requested_tick, true),
+            StatusEvidence::Foreign { .. } | StatusEvidence::Lag { .. } => {
+                (suspicion.last_requested_tick.saturating_add(1), false)
+            }
+        };
         self.begin_status_restart(
             index,
-            observation.requested_tick.saturating_add(1),
-            false,
-            &format!("contract status did not advance through signed tick {missing_target}"),
+            absence_after_tick,
+            absence_observed,
+            &format!(
+                "{} confirmed by {} observations from request tick {} through {}",
+                status_evidence_description(suspicion.evidence),
+                suspicion.confirmations,
+                suspicion.first_requested_tick,
+                suspicion.last_requested_tick
+            ),
         );
     }
 
@@ -704,7 +813,7 @@ impl ProviderEngine {
             first_target: target,
             last_target: target,
             confirmed_through: None,
-            confirmation_lag: None,
+            status_suspicion: None,
             outstanding_preimage: Box::new(next_preimage),
             calls: VecDeque::from([PlannedCall {
                 target_tick: target,
@@ -1180,6 +1289,18 @@ impl Drop for ProviderEngine {
     }
 }
 
+fn status_evidence_description(evidence: StatusEvidence) -> String {
+    match evidence {
+        StatusEvidence::Absent => "provider status does not report the slot".to_string(),
+        StatusEvidence::Foreign { last_update_tick } => {
+            format!("provider status reports non-local update tick {last_update_tick}")
+        }
+        StatusEvidence::Lag { missing_target } => {
+            format!("signed tick {missing_target} remains unconfirmed by contract status")
+        }
+    }
+}
+
 fn abort_chain(chain: Option<Chain>) {
     if let Some(mut chain) = chain {
         for call in &mut chain.calls {
@@ -1288,6 +1409,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{TimeDelta, TimeZone as _};
+    use proptest::prelude::*;
 
     use super::*;
     use crate::contract::ProviderSlot;
@@ -1430,6 +1552,28 @@ mod tests {
         ));
     }
 
+    proptest! {
+        #[test]
+        fn non_increasing_request_ticks_do_not_advance_status_suspicion(
+            first in any::<u32>(),
+            candidate in any::<u32>(),
+        ) {
+            let latest = first.max(candidate);
+            let non_increasing = first.min(candidate);
+            let suspicion = StatusSuspicion::new(StatusEvidence::Absent, latest);
+
+            prop_assert_eq!(
+                suspicion.observe(
+                    StatusEvidence::Foreign {
+                        last_update_tick: candidate,
+                    },
+                    non_increasing,
+                ),
+                suspicion
+            );
+        }
+    }
+
     #[test]
     fn schedules_three_streams_six_ticks_ahead_after_observed_absence() {
         let mut engine = engine(Arc::new(MockBackend::default()));
@@ -1456,6 +1600,8 @@ mod tests {
         );
 
         engine.apply_status(0, &empty_status(109));
+        engine.apply_status(0, &empty_status(110));
+        engine.apply_status(0, &empty_status(111));
         assert!(matches!(
             engine.slots[0].state,
             SlotState::Restarting {
@@ -1477,7 +1623,134 @@ mod tests {
     }
 
     #[test]
-    fn lagging_local_status_requires_two_fresh_observations() {
+    fn active_absence_requires_three_fresh_observations() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, frozen_tail) = prepare_active_tail(&mut engine, 0);
+
+        engine.apply_status(0, &empty_status(first_target + 2));
+        engine.apply_status(0, &empty_status(first_target + 2));
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+        assert_eq!(
+            engine.slots[0]
+                .chain
+                .as_ref()
+                .expect("chain")
+                .status_suspicion,
+            Some(StatusSuspicion {
+                evidence: StatusEvidence::Absent,
+                confirmations: 1,
+                first_requested_tick: first_target + 2,
+                last_requested_tick: first_target + 2,
+            })
+        );
+
+        engine.apply_status(0, &empty_status(first_target + 3));
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+        engine.apply_status(0, &empty_status(first_target + 4));
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting {
+                frozen_tail: tail,
+                absence_observed: true,
+                ..
+            } if tail == frozen_tail
+        ));
+    }
+
+    #[test]
+    fn chain_keeps_planning_until_third_status_confirmation() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, old_tail) = prepare_active_tail(&mut engine, 0);
+
+        engine.apply_status(0, &empty_status(first_target + 2));
+        engine.apply_status(0, &empty_status(first_target + 3));
+        engine
+            .extend_chain(0, old_tail)
+            .expect("suspected chain remains plannable");
+
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+        assert!(engine.slots[0].chain.as_ref().expect("chain").last_target > old_tail);
+    }
+
+    #[test]
+    fn starting_foreign_status_waits_for_target_and_three_confirmations() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        observe_absence(&mut engine, 0, 99);
+        engine.start_if_ready(0, 100).expect("start chain");
+        let first_target = engine.slots[0].chain.as_ref().expect("chain").first_target;
+        let stale_target = first_target - STREAM_COUNT;
+
+        let before_execution = owned_status(&engine, 0, first_target, stale_target);
+        engine.apply_status(0, &before_execution);
+        assert_eq!(
+            engine.slots[0]
+                .chain
+                .as_ref()
+                .expect("chain")
+                .status_suspicion,
+            None
+        );
+
+        for requested_tick in first_target + 1..first_target + 3 {
+            let foreign = owned_status(&engine, 0, requested_tick, stale_target);
+            engine.apply_status(0, &foreign);
+            assert!(matches!(engine.slots[0].state, SlotState::Starting { .. }));
+        }
+        let third = owned_status(&engine, 0, first_target + 3, stale_target);
+        engine.apply_status(0, &third);
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting {
+                absence_observed: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn contradictory_evidence_restarts_the_confirmation_series() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, _) = prepare_active_tail(&mut engine, 0);
+        let stale_target = first_target - STREAM_COUNT;
+
+        engine.apply_status(0, &empty_status(first_target + 2));
+        engine.apply_status(0, &owned_status(&engine, 0, first_target + 3, stale_target));
+        engine.apply_status(0, &empty_status(first_target + 4));
+
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+        assert_eq!(
+            engine.slots[0]
+                .chain
+                .as_ref()
+                .expect("chain")
+                .status_suspicion,
+            Some(StatusSuspicion {
+                evidence: StatusEvidence::Absent,
+                confirmations: 1,
+                first_requested_tick: first_target + 4,
+                last_requested_tick: first_target + 4,
+            })
+        );
+    }
+
+    #[test]
+    fn advancing_owned_status_clears_absence_suspicion() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, _) = prepare_active_tail(&mut engine, 0);
+
+        engine.apply_status(0, &empty_status(first_target + 2));
+        engine.apply_status(0, &empty_status(first_target + 3));
+        let advanced = owned_status(&engine, 0, first_target + 4, first_target + STREAM_COUNT);
+        engine.apply_status(0, &advanced);
+
+        let chain = engine.slots[0].chain.as_ref().expect("chain");
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+        assert_eq!(chain.confirmed_through, Some(first_target + STREAM_COUNT));
+        assert_eq!(chain.status_suspicion, None);
+    }
+
+    #[test]
+    fn lagging_local_status_requires_three_fresh_observations() {
         let mut engine = engine(Arc::new(MockBackend::default()));
         let (first_target, frozen_tail) = prepare_active_tail(&mut engine, 0);
 
@@ -1489,10 +1762,14 @@ mod tests {
                 .chain
                 .as_ref()
                 .expect("chain")
-                .confirmation_lag,
-            Some(ConfirmationLag {
-                missing_target: first_target + STREAM_COUNT,
+                .status_suspicion,
+            Some(StatusSuspicion {
+                evidence: StatusEvidence::Lag {
+                    missing_target: first_target + STREAM_COUNT,
+                },
+                confirmations: 1,
                 first_requested_tick: first_target + 4,
+                last_requested_tick: first_target + 4,
             })
         );
 
@@ -1501,6 +1778,10 @@ mod tests {
 
         let second_lag = owned_status(&engine, 0, first_target + 5, first_target);
         engine.apply_status(0, &second_lag);
+        assert_eq!(engine.slots[0].state, SlotState::Active);
+
+        let third_lag = owned_status(&engine, 0, first_target + 6, first_target);
+        engine.apply_status(0, &third_lag);
         assert!(matches!(
             engine.slots[0].state,
             SlotState::Restarting {
@@ -1526,7 +1807,7 @@ mod tests {
         let chain = engine.slots[0].chain.as_ref().expect("chain");
         assert_eq!(engine.slots[0].state, SlotState::Active);
         assert_eq!(chain.confirmed_through, Some(first_target + STREAM_COUNT));
-        assert_eq!(chain.confirmation_lag, None);
+        assert_eq!(chain.status_suspicion, None);
     }
 
     #[tokio::test]
@@ -1538,6 +1819,8 @@ mod tests {
         engine.apply_status(1, &first_lag);
         let second_lag = owned_status(&engine, 1, first_target + 5, first_target);
         engine.apply_status(1, &second_lag);
+        let third_lag = owned_status(&engine, 1, first_target + 6, first_target);
+        engine.apply_status(1, &third_lag);
 
         let signed_call_count = engine.slots[1].chain.as_ref().expect("chain").calls.len();
         engine
@@ -1557,8 +1840,9 @@ mod tests {
         harvest_until_idle(&mut engine, 1).await;
         assert_eq!(backend.broadcasts.lock().expect("broadcast lock").len(), 1);
 
-        engine.apply_status(1, &empty_status(frozen_tail));
-        engine.finish_status_restart(1, frozen_tail);
+        let absence_tick = frozen_tail + 1;
+        engine.apply_status(1, &empty_status(absence_tick));
+        engine.finish_status_restart(1, absence_tick);
         assert!(matches!(
             engine.slots[1].state,
             SlotState::Waiting {
@@ -1567,7 +1851,7 @@ mod tests {
             }
         ));
         engine
-            .start_if_ready(1, frozen_tail)
+            .start_if_ready(1, absence_tick)
             .expect("fresh first commit");
         let replacement = engine.slots[1].chain.as_ref().expect("new chain");
         assert!(replacement.first_target >= frozen_tail + SEND_LEAD_TICKS);
@@ -1589,6 +1873,8 @@ mod tests {
         engine.apply_status(0, &first_lag);
         let second_lag = owned_status(&engine, 0, first_target + 5, first_target);
         engine.apply_status(0, &second_lag);
+        let third_lag = owned_status(&engine, 0, first_target + 6, first_target);
+        engine.apply_status(0, &third_lag);
 
         engine.expire_calls(0, first_target + STREAM_COUNT);
 
@@ -1614,6 +1900,8 @@ mod tests {
         engine.apply_status(2, &first_lag);
         let second_lag = owned_status(&engine, 2, first_target + 5, first_target);
         engine.apply_status(2, &second_lag);
+        let third_lag = owned_status(&engine, 2, first_target + 6, first_target);
+        engine.apply_status(2, &third_lag);
 
         engine
             .enter_drain(2, DrainReason::Shutdown)
@@ -1965,6 +2253,8 @@ mod tests {
         engine.apply_status(0, &first_lag);
         let second_lag = owned_status(&engine, 0, first_target + 5, first_target);
         engine.apply_status(0, &second_lag);
+        let third_lag = owned_status(&engine, 0, first_target + 6, first_target);
+        engine.apply_status(0, &third_lag);
         assert!(matches!(
             engine.slots[0].state,
             SlotState::Restarting { .. }

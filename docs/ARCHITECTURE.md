@@ -105,11 +105,13 @@ remains active while tick calls are awaited.
   until its target. Reveal, commitment, tick, signature, and transaction ID
   are never regenerated or retargeted. Nothing is broadcast at or after the
   target.
-- Planning continues without waiting for each target confirmation. One older
-  local `lastUpdateTick` starts a suspicion; only a second successfully decoded
-  observation requested at a later tick with the same first unconfirmed target
-  freezes the chain. Status advancement clears the suspicion, and a regressing
-  local tick is treated as stale.
+- Planning continues without waiting for each target confirmation. Absence, a
+  foreign target, or an older local `lastUpdateTick` starts a suspicion, but
+  planning continues through the first two confirmations. Only a third
+  consistent successfully decoded observation requested at a later tick
+  freezes the chain. Status advancement clears the suspicion; duplicate or
+  regressing request ticks do not advance it, and a regressing local tick is
+  treated as stale.
 - While `Starting` or `Active`, if any required target arrives without backend
   acceptance, that local chain stops and waits for a status query requested
   after the discontinuity. `Restarting` follows its frozen-tail rule below.
@@ -163,8 +165,8 @@ empty tick.
 | State | Meaning | Principal exits |
 | --- | --- | --- |
 | `Waiting` | No usable local chain. It may be waiting for a fresh absence or for a restart target window. | `Starting` after one eligible absent status response; remains waiting while occupied. |
-| `Starting` | A fresh first commit and its predictive continuation are locally known. | `Active` after one owned status response; `Restarting` after one eligible absent or foreign response; `Draining` when requested. |
-| `Active` | The local reveal/commit chain is continuously extended. | `Restarting` after status absence, a foreign target, or confirmed acknowledgement lag; `Waiting` after a missed target; `Draining` when requested. |
+| `Starting` | A fresh first commit and its predictive continuation are locally known. | `Active` after one owned status response; `Restarting` after three consistent eligible absent or foreign responses; `Draining` when requested. |
+| `Active` | The local reveal/commit chain is continuously extended. | `Restarting` after three consistent observations of status absence, a foreign target, or acknowledgement lag; `Waiting` after a missed target; `Draining` when requested. |
 | `Restarting` | Status made the local chain untrustworthy. Planning is frozen, but its already signed six-tick tail keeps its normal delivery policy. | `Waiting` after the frozen tail finishes; `Drained` if epoch drain or shutdown was requested. |
 | `Draining` | Normal planning is frozen and a terminal reveal follows the frozen tail. | `Drained` after acceptance or failure/expiry. |
 | `Drained` | No more transactions are created in this epoch or shutdown flow. | `Waiting` only after an observed epoch-number change. |
@@ -183,19 +185,23 @@ classifies an exact `(stream, tier)` as owned, absent, or foreign.
 An owned response has a `lastUpdateTick` in the uninterrupted signed local
 target sequence. The chain keeps the greatest such tick as an acknowledgement
 watermark. For a status query requested at tick `R`, only signed targets below
-`R` are due. If the first due target after the watermark remains unconfirmed in
-two successfully decoded observations with increasing request ticks, the chain
-becomes untrustworthy. Advancement resets the suspicion; a response below the
-watermark is stale and cannot confirm a lag. A target outside the signed local
-sequence is immediately foreign. For `Starting`, absence is ignored until the
-response was requested after the first target could execute.
+`R` are due. The chain records one status suspicion at a time: repeated absence,
+non-regressing foreign targets, or the same first due target left unconfirmed.
+The evidence must agree across three successfully decoded observations with
+strictly increasing request ticks. Switching evidence starts again at one;
+duplicate or regressing request ticks do not count. Advancement resets the
+suspicion, and a response below the acknowledgement watermark is stale and
+cannot confirm a lag. For `Starting`, absence and foreign targets are ignored
+until the response was requested after the first target could execute.
 
-Status absence, a foreign target, or confirmed acknowledgement lag freezes the
-current signed tail instead of aborting it. No new calls are planned, while all
-already signed calls through the old six-tick horizon retain identical-byte
-retry until backend acceptance or target expiry. Expiry of one call during this
-frozen disposal does not prevent later signed calls from being attempted. Once
-the tail target is reached, its transactions and preimages are discarded. No
+The first two consistent observations are logged as non-terminal suspicions and
+normal planning continues. The third status absence, non-regressing foreign
+target, or unchanged acknowledgement lag freezes the current signed tail
+instead of aborting it. No new calls are then planned, while all already signed
+calls through the old six-tick horizon retain identical-byte retry until
+backend acceptance or target expiry. Expiry of one call during this frozen
+disposal does not prevent later signed calls from being attempted. Once the
+tail target is reached, its transactions and preimages are discarded. No
 terminal reveal is created because the outstanding preimage is no longer
 trusted.
 

@@ -82,19 +82,23 @@ be greater than zero. Counters are cumulative for the process lifetime.
 
 The client keeps planning `reveal + commit` calls without waiting for every
 `lastUpdateTick`. It treats the greatest local status tick as an acknowledgement
-watermark. One response that lags behind a signed target starts a suspicion; a
-second successfully decoded response requested at a later tick must leave that
-same target unconfirmed before the chain is frozen. Advancement clears the
-suspicion, and an older regressing response is ignored as stale.
+watermark. Status absence, a foreign update, or one response that lags behind a
+signed target starts a suspicion. Normal planning continues until three
+consistent successfully decoded observations with increasing request ticks
+confirm the same kind of evidence. Duplicate or regressing request ticks do not
+count, changing evidence restarts the series at one, and local status
+advancement clears it. For a fresh chain, absence and foreign updates are
+ignored until the first target could execute.
 
-After confirmed acknowledgement lag, status absence, or a foreign target, no
-new calls are planned. The client still applies the normal delivery policy to
-the already signed six-tick tail, then discards its untrusted preimages and
-waits for the exact slot to be absent. No terminal reveal is created for that
-untrusted chain. The replacement first target is both at least six ticks ahead
-and later than the frozen signed tail. A target that expires without backend
-acceptance outside this frozen recovery still stops the chain immediately; one
-later absent response from a query requested after that break permits restart.
+The first two observations are logged as `INFO` suspicions with safe tick
+diagnostics. On the third confirmation no new calls are planned. The client
+still applies the normal delivery policy to the already signed six-tick tail,
+then discards its untrusted preimages and waits for the exact slot to be absent.
+No terminal reveal is created for that untrusted chain. The replacement first
+target is both at least six ticks ahead and later than the frozen signed tail.
+A target that expires without backend acceptance outside this frozen recovery
+still stops the chain immediately; one later absent response from a query
+requested after that break permits restart.
 
 Backend acceptance is not proof of contract execution. For RPC and Bob,
 provider status comes from their contract-query endpoint. For QubicLightNode,
