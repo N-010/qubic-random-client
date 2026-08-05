@@ -66,19 +66,32 @@ acceptance completes delivery. A failed delivery is retried with identical
 signed bytes, independently from the other calls and streams. Nothing is
 broadcast at or after its target tick.
 
-Normal `reveal + commit` deliveries are summarized in every subsequent log as
-`Sends: ok / failed / empty`. The counters exclude the first zero-reveal commit
-and terminal drain/shutdown reveals. Retries belong to one target outcome: a
-temporary broadcast error followed by backend acceptance counts only as `ok`,
-while a target that expires without acceptance counts once as `failed`.
+For RPC, acceptance additionally requires `peersBroadcasted > 0` and a
+non-empty transaction ID. A response with no reached peers is treated as a
+temporary broadcast error, so the same signed bytes remain eligible for retry
+while the immutable target is still in the future.
 
-After an accepted normal reveal, the client waits 10 ticks by default and asks
-the selected backend whether the target tick contains data or transactions. An
-empty result reclassifies that target from `ok` to `empty`; a check error is
-retried without changing the counters. This checks the tick as a whole and does
-not prove that this client's transaction executed. The interval and delay are
-configurable through `--empty-check-ms` and `--reveal-verify-after`; both must
-be greater than zero. Counters are cumulative for the process lifetime.
+Financial outcomes are summarized in every subsequent log as
+`Sends: ok / failed / empty`. A normal `reveal + commit` accepted by the backend
+starts as `ok`. A normal target that expires without acceptance, or the first
+missing normal reveal confirmed by three consistent absence/lag observations,
+counts once as `failed`; an earlier `ok` is moved rather than counted twice.
+Only that first break is failed because `Random.h` removes the provider and
+refunds later rejected tail calls. Temporary retries, first commits, and
+foreign-writer status do not increment `failed`. A failed terminal attempt or
+an attempted terminal reveal that expires does, while a successful terminal
+reveal remains excluded from `ok`. A terminal that was never attempted because
+a prerequisite already failed does not count the same collateral twice.
+
+After an accepted or failed financial target, the client waits 10 ticks by
+default and asks the selected backend whether the target tick contains data or
+transactions. An empty result reclassifies that target from `ok` or `failed`
+to `empty`; a check error is retried without changing the counters. This checks
+the tick as a whole and does not prove that this client's transaction executed.
+The interval and delay are configurable through `--empty-check-ms` and
+`--reveal-verify-after`; both must be greater than zero. Counters are cumulative
+for the process lifetime. Shutdown can finish before a terminal failure becomes
+eligible for this delayed check, in which case it remains `failed`.
 
 The client keeps planning `reveal + commit` calls without waiting for every
 `lastUpdateTick`. It treats the greatest local status tick as an acknowledgement

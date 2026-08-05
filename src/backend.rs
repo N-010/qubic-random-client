@@ -151,7 +151,13 @@ impl NetworkBackend for RpcBackend {
         let response = broadcast_transaction_with(&self.live, BASE64_STANDARD.encode(tx_bytes))
             .await
             .map_err(|_| BackendError::new("RPC broadcast request failed"))?;
-        validate_transaction_id(response.transaction_id)
+        match response.peers_broadcasted {
+            peers if peers > 0 => validate_transaction_id(response.transaction_id),
+            0 => Err(BackendError::new("RPC broadcast reached no peers")),
+            peers => Err(BackendError::new(format!(
+                "RPC broadcast returned invalid peersBroadcasted value: {peers}"
+            ))),
+        }
     }
 }
 
@@ -684,6 +690,70 @@ mod tests {
         assert!(request.contains(r#""inputType":2"#));
         assert!(request.contains(r#""inputSize":3"#));
         assert!(request.contains(r#""requestData":"AQID""#));
+    }
+
+    #[tokio::test]
+    async fn rpc_broadcast_requires_at_least_one_peer_and_a_transaction_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            [
+                r#"{"peersBroadcasted":1,"encodedTransaction":"AQID","transactionId":"abc"}"#,
+                r#"{"peersBroadcasted":0,"encodedTransaction":"AQID","transactionId":"def"}"#,
+                r#"{"peersBroadcasted":-1,"encodedTransaction":"AQID","transactionId":"ghi"}"#,
+                r#"{"peersBroadcasted":1,"encodedTransaction":"AQID","transactionId":""}"#,
+            ]
+            .into_iter()
+            .map(|body| {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                request
+            })
+            .collect::<Vec<_>>()
+        });
+        let backend = RpcBackend::new(&format!("http://{address}"));
+
+        assert_eq!(
+            backend.broadcast_transaction(vec![1, 2, 3]).await.unwrap(),
+            "abc"
+        );
+        assert_eq!(
+            backend
+                .broadcast_transaction(vec![1, 2, 3])
+                .await
+                .unwrap_err()
+                .to_string(),
+            "RPC broadcast reached no peers"
+        );
+        assert_eq!(
+            backend
+                .broadcast_transaction(vec![1, 2, 3])
+                .await
+                .unwrap_err()
+                .to_string(),
+            "RPC broadcast returned invalid peersBroadcasted value: -1"
+        );
+        assert_eq!(
+            backend
+                .broadcast_transaction(vec![1, 2, 3])
+                .await
+                .unwrap_err()
+                .to_string(),
+            "broadcast returned an empty transaction id"
+        );
+        for request in server.join().unwrap() {
+            assert!(request.starts_with("POST /live/v1/broadcast-transaction HTTP/1.1\r\n"));
+            assert!(request.contains(r#""encodedTransaction":"AQID""#));
+        }
     }
 
     #[tokio::test]

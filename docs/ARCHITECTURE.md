@@ -105,6 +105,9 @@ remains active while tick calls are awaited.
   until its target. Reveal, commitment, tick, signature, and transaction ID
   are never regenerated or retargeted. Nothing is broadcast at or after the
   target.
+- RPC acceptance requires both a non-empty transaction identifier and a
+  positive `peersBroadcasted` count. A zero or invalid peer count is a
+  temporary delivery failure and retains the identical-byte retry policy.
 - Planning continues without waiting for each target confirmation. Absence, a
   foreign target, or an older local `lastUpdateTick` starts a suspicion, but
   planning continues through the first two confirmations. Only a third
@@ -132,27 +135,39 @@ another state mutation.
 
 ## Delivery counters and empty-tick monitoring
 
-The engine keeps cumulative process-lifetime counters for normal
-`reveal + commit` targets only. First commits and terminal reveals are excluded.
-Each target has one delivery outcome: temporary broadcast errors do not count;
-backend acceptance increments `ok`, while reaching the immutable target
-without acceptance increments `failed` once.
+The engine keeps cumulative process-lifetime financial outcome counters. A
+normal `reveal + commit` accepted by the backend starts as `ok`. Temporary
+broadcast errors do not count. Reaching a normal immutable target without
+acceptance records one `failed`. Three consistent absence or acknowledgement-
+lag observations that freeze an active local chain reclassify its first
+unconfirmed normal target from `ok` to `failed`; foreign-writer evidence does
+not. The same target is never counted twice, and later signed calls in the
+untrusted tail do not add failures because `Random.h` removes the provider
+after the first missed reveal and refunds those rejected calls.
 
-An accepted normal target is queued once for a delayed check. By default the
-check becomes eligible after 10 ticks and at most one check is active; the scan
-interval defaults to 600 ms. `--reveal-verify-after` and `--empty-check-ms`
-configure positive values. A backend error or timeout requeues the check without
-changing counters. A non-empty result preserves `ok`; an empty result moves one
-outcome from `ok` to `empty`.
+First commits are excluded. Successful terminal reveals are also excluded from
+`ok`, but a failed terminal attempt or an attempted terminal reveal that
+expires records one `failed` because it can leave the outstanding collateral
+exposed to the contract's no-show path. A terminal that was never attempted
+after a prerequisite failed does not count the same collateral twice.
+
+An accepted or failed financial target is queued once for a delayed check. By
+default the check becomes eligible after 10 ticks and at most one check is
+active; the scan interval defaults to 600 ms. `--reveal-verify-after` and
+`--empty-check-ms` configure positive values. A backend error or timeout
+requeues the check without changing counters. A non-empty result preserves the
+current outcome; an empty result moves one outcome from `ok` or `failed` to
+`empty`.
 
 Empty means that the selected backend reports no data or transactions for the
 target tick as a whole. It does not prove whether this client's transaction
 executed. RPC uses tick data, Bob uses the single-tick transfers response, and
 QubicLightNode uses `GetTickTransactions`. Pending checks are discarded on an
-epoch reset or process drop, already counted acceptance remains `ok`, and
-monitoring never delays drain or graceful shutdown. The three counters remain
-cumulative across epoch changes and are appended to logs after the first
-outcome.
+epoch reset or process drop, their already counted outcome remains unchanged,
+and monitoring never delays drain or graceful shutdown. A shutdown terminal
+failure can therefore remain `failed` when the process exits before its delayed
+check. The three counters remain cumulative across epoch changes and are
+appended to logs after the first outcome.
 
 The QubicLightNode response is derived from an exact-size Core `TickData` only
 after validation of the requested tick, designated leader, unique non-zero
@@ -287,6 +302,7 @@ Every backend implements only four operations:
 There is no balance operation or balance-gated enrollment in this client.
 
 - RPC uses `/live/v1`, `/query/v1` for tick data, and base64 contract payloads.
+  Broadcast responses are accepted only when at least one peer was reached.
   A zero tick duration is normalized to 1,000 ms.
 - Bob uses JSON-RPC, tolerant result extraction, single-tick transfer queries,
   monotonic query nonces, and hexadecimal contract payloads.

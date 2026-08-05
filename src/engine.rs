@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::io::{Error as IoError, ErrorKind};
 use std::sync::Arc;
@@ -222,6 +222,13 @@ struct PendingTickCheck {
     task: NetworkTask<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendOutcome {
+    Ok,
+    Failed,
+    Empty,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SendStats {
     ok: u64,
@@ -230,19 +237,20 @@ struct SendStats {
 }
 
 impl SendStats {
-    fn record_ok(&mut self) {
-        self.ok = self.ok.saturating_add(1);
+    fn increment(&mut self, outcome: SendOutcome) {
+        match outcome {
+            SendOutcome::Ok => self.ok = self.ok.saturating_add(1),
+            SendOutcome::Failed => self.failed = self.failed.saturating_add(1),
+            SendOutcome::Empty => self.empty = self.empty.saturating_add(1),
+        }
     }
 
-    fn record_failed(&mut self, count: usize) {
-        self.failed = self
-            .failed
-            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
-    }
-
-    fn record_empty(&mut self) {
-        self.ok = self.ok.saturating_sub(1);
-        self.empty = self.empty.saturating_add(1);
+    fn decrement(&mut self, outcome: SendOutcome) {
+        match outcome {
+            SendOutcome::Ok => self.ok = self.ok.saturating_sub(1),
+            SendOutcome::Failed => self.failed = self.failed.saturating_sub(1),
+            SendOutcome::Empty => self.empty = self.empty.saturating_sub(1),
+        }
     }
 
     fn publish(self) {
@@ -262,7 +270,9 @@ pub struct ProviderEngine {
     empty_tick_check_interval: Duration,
     reveal_check_delay_ticks: u32,
     send_stats: SendStats,
+    send_outcomes: BTreeMap<u32, SendOutcome>,
     pending_tick_checks: BTreeSet<u32>,
+    checked_target_ticks: BTreeSet<u32>,
     tick_check: Option<PendingTickCheck>,
     next_tick_check_at: Instant,
 }
@@ -301,10 +311,47 @@ impl ProviderEngine {
             empty_tick_check_interval: Duration::from_millis(empty_tick_check_interval_ms),
             reveal_check_delay_ticks,
             send_stats: SendStats::default(),
+            send_outcomes: BTreeMap::new(),
             pending_tick_checks: BTreeSet::new(),
+            checked_target_ticks: BTreeSet::new(),
             tick_check: None,
             next_tick_check_at: Instant::now(),
         }
+    }
+
+    fn record_send_outcome(&mut self, target_tick: u32, next: SendOutcome) {
+        let previous = self.send_outcomes.get(&target_tick).copied();
+        let transition_allowed = match (previous, next) {
+            (None, SendOutcome::Ok | SendOutcome::Failed | SendOutcome::Empty)
+            | (Some(SendOutcome::Ok), SendOutcome::Failed | SendOutcome::Empty)
+            | (Some(SendOutcome::Failed), SendOutcome::Empty) => true,
+            (Some(SendOutcome::Ok), SendOutcome::Ok)
+            | (Some(SendOutcome::Failed), SendOutcome::Ok | SendOutcome::Failed)
+            | (
+                Some(SendOutcome::Empty),
+                SendOutcome::Ok | SendOutcome::Failed | SendOutcome::Empty,
+            ) => false,
+        };
+        if !transition_allowed {
+            return;
+        }
+        if let Some(previous) = previous {
+            self.send_stats.decrement(previous);
+        }
+        self.send_stats.increment(next);
+        self.send_outcomes.insert(target_tick, next);
+        self.send_stats.publish();
+    }
+
+    fn queue_tick_check(&mut self, target_tick: u32) {
+        if !self.checked_target_ticks.contains(&target_tick) {
+            self.pending_tick_checks.insert(target_tick);
+        }
+    }
+
+    fn mark_financial_failure(&mut self, target_tick: u32) {
+        self.record_send_outcome(target_tick, SendOutcome::Failed);
+        self.queue_tick_check(target_tick);
     }
 
     pub async fn run(
@@ -462,6 +509,8 @@ impl ProviderEngine {
             check.task.abort();
         }
         self.pending_tick_checks.clear();
+        self.checked_target_ticks.clear();
+        self.send_outcomes.clear();
         self.next_tick_check_at = Instant::now();
         for index in 0..self.slots.len() {
             abort_chain(self.slots[index].chain.take());
@@ -698,6 +747,9 @@ impl ProviderEngine {
                 (suspicion.last_requested_tick.saturating_add(1), false)
             }
         };
+        if let Some(target_tick) = self.financial_failure_target(index, suspicion.evidence) {
+            self.mark_financial_failure(target_tick);
+        }
         self.begin_status_restart(
             index,
             absence_after_tick,
@@ -710,6 +762,17 @@ impl ProviderEngine {
                 suspicion.last_requested_tick
             ),
         );
+    }
+
+    fn financial_failure_target(&self, index: usize, evidence: StatusEvidence) -> Option<u32> {
+        let chain = self.slots[index].chain.as_ref()?;
+        let target_tick = match evidence {
+            StatusEvidence::Absent => chain.confirmed_through?.checked_add(STREAM_COUNT)?,
+            StatusEvidence::Lag { missing_target } => missing_target,
+            StatusEvidence::Foreign { .. } => return None,
+        };
+        (target_tick > chain.first_target && target_tick <= chain.last_target)
+            .then_some(target_tick)
     }
 
     fn chain_owns_target(&self, index: usize, target: u32) -> bool {
@@ -941,7 +1004,8 @@ impl ProviderEngine {
 
     fn expire_calls(&mut self, index: usize, current_tick: u32) {
         let mut expired = false;
-        let mut failed_normal_calls = 0;
+        let mut first_expired_normal = None;
+        let mut attempted_terminal = None;
         if let Some(chain) = self.slots[index].chain.as_mut() {
             for call in &mut chain.calls {
                 if current_tick < call.target_tick
@@ -955,19 +1019,37 @@ impl ProviderEngine {
                 if let Some(task) = call.broadcast.take() {
                     task.abort();
                 }
-                if call.kind == CallKind::RevealAndCommit {
-                    failed_normal_calls += 1;
+                match call.kind {
+                    CallKind::FirstCommit => {}
+                    CallKind::RevealAndCommit => {
+                        first_expired_normal.get_or_insert(call.target_tick);
+                    }
+                    CallKind::TerminalReveal
+                        if matches!(
+                            call.state,
+                            BroadcastState::Broadcasting | BroadcastState::Retry
+                        ) =>
+                    {
+                        attempted_terminal = Some(call.target_tick);
+                    }
+                    CallKind::TerminalReveal => {}
                 }
                 call.state = BroadcastState::Failed;
                 expired = true;
             }
         }
-        if failed_normal_calls > 0 {
-            self.send_stats.record_failed(failed_normal_calls);
-            self.send_stats.publish();
-        }
         if !expired {
             return;
+        }
+        let financial_failure = match self.slots[index].state {
+            SlotState::Starting { .. } | SlotState::Active => first_expired_normal,
+            SlotState::Draining { .. } => first_expired_normal.or(attempted_terminal),
+            SlotState::Restarting { .. } | SlotState::Waiting { .. } | SlotState::Drained(_) => {
+                None
+            }
+        };
+        if let Some(target_tick) = financial_failure {
+            self.mark_financial_failure(target_tick);
         }
         match self.slots[index].state {
             SlotState::Starting { .. } | SlotState::Active => self.lose_chain(
@@ -1001,6 +1083,7 @@ impl ProviderEngine {
             })
         });
         let key = self.slots[index].key;
+        let mut failed_terminal_target = None;
         let Some(chain) = self.slots[index].chain.as_mut() else {
             return;
         };
@@ -1020,6 +1103,7 @@ impl ProviderEngine {
                 && call.state == BroadcastState::Retry
             {
                 call.state = BroadcastState::Failed;
+                failed_terminal_target = Some(call.target_tick);
                 continue;
             }
 
@@ -1043,6 +1127,9 @@ impl ProviderEngine {
                 key.stream, call.target_tick,
             ));
         }
+        if let Some(target_tick) = failed_terminal_target {
+            self.mark_financial_failure(target_tick);
+        }
     }
 
     async fn harvest_broadcasts(&mut self, index: usize) {
@@ -1054,8 +1141,8 @@ impl ProviderEngine {
                 ..
             }
         );
-        let stats = &mut self.send_stats;
-        let pending_tick_checks = &mut self.pending_tick_checks;
+        let mut accepted_normal_targets = Vec::new();
+        let mut failed_terminal_targets = Vec::new();
         let Some(chain) = self.slots[index].chain.as_mut() else {
             return;
         };
@@ -1070,9 +1157,7 @@ impl ProviderEngine {
                 Ok(tx_id) => {
                     call.state = BroadcastState::Accepted;
                     if call.kind == CallKind::RevealAndCommit {
-                        stats.record_ok();
-                        stats.publish();
-                        pending_tick_checks.insert(call.target_tick);
+                        accepted_normal_targets.push(call.target_tick);
                     }
                     console::log_info(format!(
                         "Backend accepted transaction {} for stream {} tick {}",
@@ -1083,6 +1168,7 @@ impl ProviderEngine {
                 }
                 Err(err) => {
                     call.state = if shutdown_drain && call.kind == CallKind::TerminalReveal {
+                        failed_terminal_targets.push(call.target_tick);
                         BroadcastState::Failed
                     } else {
                         BroadcastState::Retry
@@ -1093,6 +1179,13 @@ impl ProviderEngine {
                     ));
                 }
             }
+        }
+        for target_tick in accepted_normal_targets {
+            self.record_send_outcome(target_tick, SendOutcome::Ok);
+            self.queue_tick_check(target_tick);
+        }
+        for target_tick in failed_terminal_targets {
+            self.mark_financial_failure(target_tick);
         }
     }
 
@@ -1108,13 +1201,16 @@ impl ProviderEngine {
             return;
         };
         match join_network_task(check.task).await {
-            Ok(true) => console::log_info(format!(
-                "Target tick {} contains transactions",
-                check.target_tick
-            )),
+            Ok(true) => {
+                self.checked_target_ticks.insert(check.target_tick);
+                console::log_info(format!(
+                    "Target tick {} contains transactions",
+                    check.target_tick
+                ));
+            }
             Ok(false) => {
-                self.send_stats.record_empty();
-                self.send_stats.publish();
+                self.checked_target_ticks.insert(check.target_tick);
+                self.record_send_outcome(check.target_tick, SendOutcome::Empty);
                 console::log_warn(format!("Target tick {} is empty", check.target_tick));
             }
             Err(err) => {
@@ -2008,6 +2104,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_target_tick_reclassifies_financial_failure() {
+        let backend = Arc::new(MockBackend::default());
+        backend
+            .tick_results
+            .lock()
+            .expect("tick results lock")
+            .push_back(Ok(false));
+        let mut engine = engine(Arc::clone(&backend));
+        let target = prepare_normal_call(&mut engine, 1);
+
+        engine.expire_calls(1, target);
+        assert_eq!(engine.send_stats.failed, 1);
+        engine.ensure_tick_check(target + 1);
+        harvest_tick_check_until_idle(&mut engine).await;
+
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 0,
+                failed: 0,
+                empty: 1,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_absence_reclassifies_only_the_first_missing_reveal() {
+        let backend = Arc::new(MockBackend::default());
+        let mut engine = engine(Arc::clone(&backend));
+        let (first_target, _) = prepare_active_tail(&mut engine, 0);
+        engine.dispatch_calls(0, first_target, 1_000);
+        harvest_until_idle(&mut engine, 0).await;
+        assert_eq!(engine.send_stats.ok, 2);
+
+        engine.apply_status(0, &empty_status(first_target + 4));
+        engine.apply_status(0, &empty_status(first_target + 5));
+        engine.apply_status(0, &empty_status(first_target + 6));
+
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting { .. }
+        ));
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 1,
+                failed: 1,
+                empty: 0,
+            }
+        );
+        engine.apply_status(0, &empty_status(first_target + 7));
+        assert_eq!(engine.send_stats.failed, 1);
+    }
+
+    #[test]
+    fn confirmed_lag_counts_the_first_missing_reveal() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, _) = prepare_active_tail(&mut engine, 0);
+
+        for requested_tick in first_target + 4..=first_target + 6 {
+            let lag = owned_status(&engine, 0, requested_tick, first_target);
+            engine.apply_status(0, &lag);
+        }
+
+        assert!(matches!(
+            engine.slots[0].state,
+            SlotState::Restarting { .. }
+        ));
+        assert_eq!(engine.send_stats.failed, 1);
+    }
+
+    #[test]
+    fn foreign_status_restart_does_not_count_a_financial_failure() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (first_target, _) = prepare_active_tail(&mut engine, 1);
+
+        for requested_tick in first_target + 4..=first_target + 6 {
+            let foreign = owned_status(&engine, 1, requested_tick, first_target + 1);
+            engine.apply_status(1, &foreign);
+        }
+
+        assert!(matches!(
+            engine.slots[1].state,
+            SlotState::Restarting { .. }
+        ));
+        assert_eq!(engine.send_stats, SendStats::default());
+    }
+
+    #[tokio::test]
     async fn accepted_call_is_never_rebroadcast_at_or_after_target() {
         let backend = Arc::new(MockBackend::default());
         let mut engine = engine(Arc::clone(&backend));
@@ -2146,6 +2331,86 @@ mod tests {
             SlotState::Drained(DrainOutcome::Failed)
         );
         assert_eq!(backend.broadcasts.lock().expect("broadcast lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_terminal_failure_counts_one_financial_failure() {
+        let backend = Arc::new(MockBackend::default());
+        backend.failures_left.store(1, Ordering::Relaxed);
+        let mut engine = engine(Arc::clone(&backend));
+        observe_absence(&mut engine, 1, 99);
+        engine.start_if_ready(1, 100).expect("start chain");
+        engine
+            .enter_drain(1, DrainReason::Shutdown)
+            .expect("enter drain");
+        engine.slots[1].chain.as_mut().expect("chain").calls[0].state = BroadcastState::Accepted;
+
+        engine.dispatch_calls(1, 103, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        engine.finish_drain(1);
+
+        assert_eq!(engine.send_stats.failed, 1);
+        assert_eq!(
+            engine.slots[1].state,
+            SlotState::Drained(DrainOutcome::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_attempted_terminal_counts_one_financial_failure() {
+        let backend = Arc::new(MockBackend::default());
+        backend.failures_left.store(1, Ordering::Relaxed);
+        let mut engine = engine(Arc::clone(&backend));
+        observe_absence(&mut engine, 1, 99);
+        engine.start_if_ready(1, 100).expect("start chain");
+        engine
+            .enter_drain(1, DrainReason::Epoch)
+            .expect("enter drain");
+        engine.slots[1].chain.as_mut().expect("chain").calls[0].state = BroadcastState::Accepted;
+        let terminal_target = engine.slots[1]
+            .chain
+            .as_ref()
+            .expect("chain")
+            .calls
+            .back()
+            .expect("terminal")
+            .target_tick;
+
+        engine.dispatch_calls(1, terminal_target - SEND_LEAD_TICKS, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        engine.expire_calls(1, terminal_target);
+
+        assert_eq!(engine.send_stats.failed, 1);
+        assert_eq!(
+            engine.slots[1].state,
+            SlotState::Drained(DrainOutcome::Failed)
+        );
+    }
+
+    #[test]
+    fn unattempted_terminal_does_not_double_count_failed_prerequisite() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let normal_target = prepare_normal_call(&mut engine, 1);
+        engine
+            .enter_drain(1, DrainReason::Epoch)
+            .expect("enter drain");
+        let terminal_target = engine.slots[1]
+            .chain
+            .as_ref()
+            .expect("chain")
+            .calls
+            .back()
+            .expect("terminal")
+            .target_tick;
+
+        engine.expire_calls(1, terminal_target);
+
+        assert_eq!(engine.send_stats.failed, 1);
+        assert_eq!(
+            engine.send_outcomes.get(&normal_target),
+            Some(&SendOutcome::Failed)
+        );
+        assert!(!engine.send_outcomes.contains_key(&terminal_target));
     }
 
     #[tokio::test]
