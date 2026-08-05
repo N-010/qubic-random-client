@@ -242,9 +242,10 @@ discarded. Every stream returns to `Waiting` and requires a new status
 observation. Enrollment is paused until `initial_tick + 50` by default,
 configurable with `--resume-after-epoch-start-ticks`.
 
-QubicLightNode `HEAD` does not expose the epoch's initial tick. Its adapter uses
-the first structurally valid peer-reported tick observed in that epoch as a
-conservative local initial tick, including at process startup.
+The current compatible QubicLightNode schema does not expose the epoch's
+initial tick. Its adapter uses the first structurally valid peer-reported tick
+observed in that epoch as a conservative local initial tick, including at
+process startup.
 
 ## Pre-epoch drain
 

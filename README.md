@@ -16,7 +16,7 @@ Rust stable with edition 2024 support is required.
 
 ```bash
 cargo build --release --locked
-cargo test --all-targets
+cargo test --all-targets --all-features --locked
 cargo run --release -- --seed <55-letter-seed>
 ```
 
@@ -152,14 +152,11 @@ shutdown waits only for its frozen signed tail and does not append
 
 ## QubicLightNode
 
-The companion source is expected at:
-
-```text
-D:\Work\MySelf\Qubic\QubicLightNode
-```
-
-The protocol tracks the current QubicLightNode `HEAD` in that checkout. Tick
-status advances after one exact-size, structurally valid `BroadcastTick` or
+The `grpc` backend uses the schema in `proto/lightnode.proto`. Its compatible
+QubicLightNode revision is still being prepared and has not been published or
+tagged. Until that compatibility point is published, treat the gRPC pairing as
+pre-release and use the matching local QubicLightNode checkout. Tick status
+advances after one exact-size, structurally valid `BroadcastTick` or
 `RespondCurrentTickInfo` message. It is deliberately not signature- or
 quorum-authenticated. Missing `initial_tick` and `tick_duration_ms` are
 normalized to the first observed tick of the epoch and 1,000 ms respectively.
@@ -174,17 +171,6 @@ verifies transaction signatures locally before forwarding transactions.
 not affect provider state or scheduling. QubicLightNode derives its boolean
 result from an exact-size Core `TickData` after checking the requested tick,
 leader, digest set, current-epoch computor key, K12 digest, and FourQ signature.
-
-`compose.yaml` uses the QubicLightNode checkout as its build context:
-
-```bash
-docker compose up --build
-```
-
-At the current QubicLightNode `HEAD`, this build is blocked because its
-`Dockerfile` does not copy the path dependency `crates/qubic-fourq-verifier`
-into the builder. RandomClient intentionally carries no duplicate Dockerfile
-workaround. The compose client connects to `http://light-node:50051`.
 
 ## Protocol and security notes
 

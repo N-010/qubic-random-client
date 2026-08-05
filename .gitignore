@@ -7,6 +7,14 @@
 
 *.zip
 
+# Local container, cross-build, and operator tooling
+.dockerignore
+Dockerfile*
+compose*.yml
+compose*.yaml
+docker-compose*.yml
+docker-compose*.yaml
+Cross.toml
 *.ps1
 
 # LLM
