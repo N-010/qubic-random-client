@@ -219,6 +219,7 @@ struct StatusObservation {
 
 struct PendingTickCheck {
     target_tick: u32,
+    failures: u32,
     task: NetworkTask<bool>,
 }
 
@@ -272,6 +273,8 @@ pub struct ProviderEngine {
     send_stats: SendStats,
     send_outcomes: BTreeMap<u32, SendOutcome>,
     pending_tick_checks: BTreeSet<u32>,
+    ready_tick_checks: BTreeMap<(Instant, u32), u32>,
+    queued_target_ticks: BTreeSet<u32>,
     checked_target_ticks: BTreeSet<u32>,
     tick_check: Option<PendingTickCheck>,
     next_tick_check_at: Instant,
@@ -313,6 +316,8 @@ impl ProviderEngine {
             send_stats: SendStats::default(),
             send_outcomes: BTreeMap::new(),
             pending_tick_checks: BTreeSet::new(),
+            ready_tick_checks: BTreeMap::new(),
+            queued_target_ticks: BTreeSet::new(),
             checked_target_ticks: BTreeSet::new(),
             tick_check: None,
             next_tick_check_at: Instant::now(),
@@ -344,7 +349,9 @@ impl ProviderEngine {
     }
 
     fn queue_tick_check(&mut self, target_tick: u32) {
-        if !self.checked_target_ticks.contains(&target_tick) {
+        if !self.checked_target_ticks.contains(&target_tick)
+            && self.queued_target_ticks.insert(target_tick)
+        {
             self.pending_tick_checks.insert(target_tick);
         }
     }
@@ -509,6 +516,8 @@ impl ProviderEngine {
             check.task.abort();
         }
         self.pending_tick_checks.clear();
+        self.ready_tick_checks.clear();
+        self.queued_target_ticks.clear();
         self.checked_target_ticks.clear();
         self.send_outcomes.clear();
         self.next_tick_check_at = Instant::now();
@@ -1202,6 +1211,7 @@ impl ProviderEngine {
         };
         match join_network_task(check.task).await {
             Ok(true) => {
+                self.queued_target_ticks.remove(&check.target_tick);
                 self.checked_target_ticks.insert(check.target_tick);
                 console::log_info(format!(
                     "Target tick {} contains transactions",
@@ -1209,12 +1219,17 @@ impl ProviderEngine {
                 ));
             }
             Ok(false) => {
+                self.queued_target_ticks.remove(&check.target_tick);
                 self.checked_target_ticks.insert(check.target_tick);
                 self.record_send_outcome(check.target_tick, SendOutcome::Empty);
                 console::log_warn(format!("Target tick {} is empty", check.target_tick));
             }
             Err(err) => {
-                self.pending_tick_checks.insert(check.target_tick);
+                let retry_delay = Duration::from_secs((1u64 << check.failures.min(5)).min(30));
+                self.ready_tick_checks.insert(
+                    (Instant::now() + retry_delay, check.target_tick),
+                    check.failures.saturating_add(1),
+                );
                 console::log_warn(format!(
                     "Could not verify target tick {} yet: {err}",
                     check.target_tick
@@ -1228,20 +1243,26 @@ impl ProviderEngine {
         if self.tick_check.is_some() || now < self.next_tick_check_at {
             return;
         }
-        let Some(target_tick) = self
-            .pending_tick_checks
-            .iter()
-            .copied()
-            .find(|target_tick| {
-                current_tick >= target_tick.saturating_add(self.reveal_check_delay_ticks)
-            })
+        while let Some(&target_tick) = self.pending_tick_checks.first() {
+            if current_tick < target_tick.saturating_add(self.reveal_check_delay_ticks) {
+                break;
+            }
+            self.pending_tick_checks.remove(&target_tick);
+            self.queued_target_ticks.insert(target_tick);
+            self.ready_tick_checks.insert((now, target_tick), 0);
+        }
+        let Some((&(ready_at, target_tick), &failures)) = self.ready_tick_checks.first_key_value()
         else {
             return;
         };
-        self.pending_tick_checks.remove(&target_tick);
+        if ready_at > now {
+            return;
+        }
+        self.ready_tick_checks.pop_first();
         let backend = Arc::clone(&self.backend);
         self.tick_check = Some(PendingTickCheck {
             target_tick,
+            failures,
             task: spawn_network_task("query target tick data", async move {
                 backend
                     .tick_has_transactions(target_tick)
@@ -2276,9 +2297,15 @@ mod tests {
         engine.ensure_tick_check(target + 1);
         harvest_tick_check_until_idle(&mut engine).await;
         assert_eq!(engine.send_stats.ok, 1);
-        assert!(engine.pending_tick_checks.contains(&target));
+        assert!(engine.queued_target_ticks.contains(&target));
 
         engine.next_tick_check_at = Instant::now();
+        engine.ensure_tick_check(target + 1);
+        assert!(engine.tick_check.is_none());
+        let ((_, retry_tick), failures) = engine.ready_tick_checks.pop_first().unwrap();
+        engine
+            .ready_tick_checks
+            .insert((Instant::now(), retry_tick), failures);
         engine.ensure_tick_check(target + 1);
         harvest_tick_check_until_idle(&mut engine).await;
         assert_eq!(
@@ -2290,6 +2317,119 @@ mod tests {
             }
         );
         assert_eq!(backend.tick_checks.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn unavailable_tick_yields_to_new_checks_and_is_not_queued_twice() {
+        let backend = Arc::new(MockBackend::default());
+        backend.tick_results.lock().unwrap().extend([
+            Err(BackendError::new("unavailable")),
+            Ok(false),
+            Ok(true),
+        ]);
+        let mut engine = engine(Arc::clone(&backend));
+        for tick in [100, 101] {
+            engine.record_send_outcome(tick, SendOutcome::Ok);
+            engine.queue_tick_check(tick);
+        }
+        engine.ensure_tick_check(110);
+        engine.queue_tick_check(100);
+        assert!(engine.pending_tick_checks.is_empty());
+        harvest_tick_check_until_idle(&mut engine).await;
+        engine.queue_tick_check(100);
+        engine.next_tick_check_at = Instant::now();
+        engine.ensure_tick_check(110);
+        assert_eq!(engine.tick_check.as_ref().map(|c| c.target_tick), Some(101));
+        harvest_tick_check_until_idle(&mut engine).await;
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 1,
+                failed: 0,
+                empty: 1
+            }
+        );
+
+        let ((_, tick), failures) = engine.ready_tick_checks.pop_first().unwrap();
+        engine
+            .ready_tick_checks
+            .insert((Instant::now(), tick), failures);
+        engine.queue_tick_check(102);
+        engine.next_tick_check_at = Instant::now();
+        engine.ensure_tick_check(110);
+        assert_eq!(engine.tick_check.as_ref().map(|c| c.target_tick), Some(100));
+        harvest_tick_check_until_idle(&mut engine).await;
+        engine.queue_tick_check(100);
+        assert!(!engine.queued_target_ticks.contains(&100));
+        assert_eq!(backend.tick_checks.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 1,
+                failed: 0,
+                empty: 1
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_tick_backoff_is_capped_and_preserves_outcome() {
+        let backend = Arc::new(MockBackend::default());
+        let mut engine = engine(Arc::clone(&backend));
+        engine.record_send_outcome(100, SendOutcome::Failed);
+        engine.queue_tick_check(100);
+        for seconds in [1, 2, 4, 8, 16, 30, 30] {
+            backend
+                .tick_results
+                .lock()
+                .unwrap()
+                .push_back(Err(BackendError::new("timeout")));
+            engine.next_tick_check_at = Instant::now();
+            engine.ensure_tick_check(110);
+            let before = Instant::now();
+            harvest_tick_check_until_idle(&mut engine).await;
+            let ((ready_at, tick), failures) = engine.ready_tick_checks.pop_first().unwrap();
+            assert!(ready_at >= before + Duration::from_secs(seconds));
+            assert!(ready_at <= Instant::now() + Duration::from_secs(seconds));
+            engine
+                .ready_tick_checks
+                .insert((Instant::now(), tick), failures);
+            assert_eq!(
+                engine.send_stats,
+                SendStats {
+                    ok: 0,
+                    failed: 1,
+                    empty: 0
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn epoch_reset_clears_waiting_ready_and_active_checks() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        engine.record_send_outcome(100, SendOutcome::Ok);
+        for tick in [100, 101, 1000] {
+            engine.queue_tick_check(tick);
+        }
+        engine.ensure_tick_check(110);
+        let active = engine.tick_check.as_ref().unwrap().task.abort_handle();
+        engine.reset_slots();
+        tokio::task::yield_now().await;
+        assert!(active.is_finished());
+        assert!(engine.tick_check.is_none());
+        assert!(engine.pending_tick_checks.is_empty());
+        assert!(engine.ready_tick_checks.is_empty());
+        assert!(engine.queued_target_ticks.is_empty());
+        assert!(engine.checked_target_ticks.is_empty());
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 1,
+                failed: 0,
+                empty: 0
+            }
+        );
     }
 
     #[tokio::test]

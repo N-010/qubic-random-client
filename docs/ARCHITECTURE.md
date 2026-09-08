@@ -155,7 +155,13 @@ An accepted or failed financial target is queued once for a delayed check. By
 default the check becomes eligible after 10 ticks and at most one check is
 active; the scan interval defaults to 600 ms. `--reveal-verify-after` and
 `--empty-check-ms` configure positive values. A backend error or timeout
-requeues the check without changing counters. A non-empty result preserves the
+requeues the check without changing counters. Waiting targets are promoted only
+after their tick delay. Ready checks are ordered by next-attempt time, with tick
+as the tie-breaker. An error delays that target by 1, 2, 4, 8, 16, then 30 seconds
+for all subsequent retries; it cannot block other ready targets. The scan
+interval still limits all starts. Deduplication includes waiting, ready, active,
+and completed checks. Retries continue until success or epoch reset/drop, with
+no age-based eviction. A non-empty result preserves the
 current outcome; an empty result moves one outcome from `ok` or `failed` to
 `empty`.
 
@@ -174,6 +180,12 @@ after validation of the requested tick, designated leader, unique non-zero
 digest set, active arbitrator-authenticated computor key, K12 digest, and FourQ
 signature. Missing authentication state is an unavailable observation, not an
 empty tick.
+
+QubicLightNode maintains computor retrieval throughout each peer session. It
+rechecks the authenticated epoch at the reconnect interval and requests keys
+again when they do not match the observed epoch, with retries capped at 30
+seconds. Receipt alone does not establish readiness; the verified set must
+have been applied.
 
 ## Stream state machine
 
@@ -314,7 +326,15 @@ There is no balance operation or balance-gated enrollment in this client.
 QubicLightNode verifies transaction signatures locally, but tick status comes
 from one structurally valid `BroadcastTick` or `RespondCurrentTickInfo` message
 without signature or quorum authentication. An ordinary contract-function RPC
-likewise returns one accepted peer response. The client uses these responses
+returns the first accepted peer response after a freshness preflight on that
+same session. Each query snapshots the cached epoch/tick, then requests Core
+`RespondCurrentTickInfo` from up to three peers. Only peers in that epoch and
+at most one tick behind the snapshot may receive the contract query. A zero
+status or missing reference is unavailable. Both stages share the existing
+query deadline; no eligible result is an error, never provider absence. Ordinary
+lag does not penalize a peer. This filter is a user-approved availability
+adaptation, not authentication, and still depends on the unauthenticated cache.
+The client uses these responses
 directly, as it does for RPC and Bob. For QubicLightNode they are peer-trusted
 data, not cryptographic authentication or a Qubic consensus proof.
 

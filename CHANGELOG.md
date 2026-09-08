@@ -2,7 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## v2.0.1 - 2026-09-08
+
+### Fixed
+
+- Prevent unavailable tick checks from blocking other ready targets, with
+  deduplicated retries and exponential backoff capped at 30 seconds.
+- Document matching QubicLightNode epoch-key refresh and peer freshness
+  checks, preserving scheduling and shutdown invariants.
+
+## v2.0.0
 
 ### Changed
 

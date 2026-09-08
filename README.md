@@ -13,12 +13,11 @@ The client supports three network backends:
 
 ## Release status
 
-This repository is being prepared for RandomClient v2.0.0. Build and run it
-from source for now; packaged binaries and checksums are not published yet.
+RandomClient v2.0.1 is a source release. Build and run the tagged checkout;
+packaged binaries and checksums are not included.
 
-The compatible QubicLightNode v2.0.0 revision is also being prepared. Until it
-is published and tagged, treat the `grpc` backend as pre-release and use the
-matching local QubicLightNode checkout.
+For the `grpc` backend, use QubicLightNode v2.0.1 with the matching
+`proto/lightnode.proto` schema.
 
 ## Requirements
 
@@ -101,6 +100,11 @@ These counters distinguish backend acceptance, failed financial targets, and
 later observations that the whole target tick was empty; they are not a proof
 that a particular transaction executed.
 
+Unavailable tick checks retry after 1, 2, 4, 8, 16, then 30 seconds without
+blocking other eligible checks. They remain pending until success or an epoch
+change/process exit. Backend errors preserve the counters, so `empty = 0` does
+not establish that all ticks were checked successfully.
+
 The complete scheduling, recovery, epoch, and shutdown state machines are
 specified in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). A non-normative
 Russian translation is available in
@@ -110,7 +114,11 @@ Russian translation is available in
 
 RPC and Bob obtain provider status through their contract-query endpoints.
 QubicLightNode returns one structurally valid peer response for contract
-queries and derives empty-tick status from validated Core tick data. Its tick
+queries after checking that peer's current epoch/tick against the query's
+cached reference (same epoch, at most one tick behind). If no eligible peer
+answers, the query fails temporarily. QubicLightNode refreshes authenticated
+computor keys across epochs and derives empty-tick status from validated Core
+tick data. Its tick
 and contract-query observations are peer-trusted data, not a Qubic consensus
 proof. QubicLightNode still verifies transaction signatures locally before
 forwarding transactions.
