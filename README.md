@@ -13,7 +13,7 @@ The client supports three network backends:
 
 ## Release status
 
-RandomClient v2.0.2 can be built from the tagged checkout. Successful tag
+RandomClient v2.0.3 can be built from the tagged checkout. Successful tag
 workflows also publish Linux and Windows binaries to GitHub Releases.
 
 For the `grpc` backend, use QubicLightNode v2.0.2 with the matching
@@ -85,13 +85,24 @@ Both empty-tick timing options must be greater than zero.
 
 - The process manages one chain per Random stream for the selected identity and
   collateral tier. Run exactly one writer for that identity/tier combination.
+- The engine polls ticks every 100 ms and dispatches transactions before new
+  background queries. Provider-status queries remain limited to two per second.
 - Each stream uses its assigned three-tick sequence. Transactions become
   eligible for broadcast six ticks before their immutable target tick.
 - A temporary delivery failure retries identical signed bytes until the target
   tick. A backend acceptance is not proof of contract execution.
+- An accepted first commit or normal call gets one additional identical-byte
+  send four ticks before its target (three if polling skips that boundary).
+  No extra send starts at or after Core's two-tick publication boundary.
+  Its result does not change delivery counters. No extra sends start for the
+  old frozen tail or during drain, and terminal reveals are excluded.
 - A chain restarts only after a fresh `GetProviderStatus` observation reports
-  its exact `(stream, tier)` absent. Confirmed foreign or stale status freezes
-  planning and discards untrusted preimages after the signed tail is handled.
+  its exact `(stream, tier)` absent. Three consistent absence, foreign-target,
+  or acknowledgement-lag observations freeze the old chain. A replacement can
+  be sent while that old signed tail finishes:
+  its first target is at least six ticks ahead and three ticks after the old
+  tail. Old retries keep identical bytes and cannot stop the replacement or
+  block its terminal reveal. The new chain retains normal broadcast timing.
 - Before the Wednesday 12:00 UTC epoch boundary, the client drains planned work
   and attempts a terminal `reveal + zero commit`. It waits through the new-epoch
   warmup before enrolling again.
@@ -104,10 +115,13 @@ These counters distinguish backend acceptance, failed financial targets, and
 later observations that the whole target tick was empty; they are not a proof
 that a particular transaction executed.
 
-Unavailable tick checks retry after 1, 2, 4, 8, 16, then 30 seconds without
-blocking other eligible checks. They remain pending until success or an epoch
-change/process exit. Backend errors preserve the counters, so `empty = 0` does
-not establish that all ticks were checked successfully.
+Tick checks prioritize the newest eligible targets, with one request at a time
+and a two-second timeout. Unavailable checks retry after 1, 2, 4, 8, 16, then
+30 seconds, only through 32 ticks after `--reveal-verify-after` (age 42 with
+defaults). Older checks are discarded and reported as unverified, preserving
+the counters. No new checks start during drain or shutdown. Monitoring can
+skip targets under load; `empty = 0` does not establish that all ticks were
+checked successfully. This monitoring window does not change the SC schedule.
 
 The complete scheduling, recovery, epoch, and shutdown state machines are
 specified in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). A non-normative

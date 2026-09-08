@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## v2.0.3 - 2026-09-09
+
+### Fixed
+
+- Prioritize transaction delivery with 100 ms tick polling and two-second
+  tick-query timeouts, while keeping provider-status queries rate limited.
+- Add one identical-byte broadcast before Core's transaction publication
+  boundary to improve dissemination without changing delivery counters.
+- Prepare replacement registrations while the old signed tail finishes,
+  preserving the six-tick send lead, three-tick spacing, and fresh-absence
+  requirement. Old retries cannot stop the replacement or block its drain.
+- Prioritize recent eligible tick checks and expire checks outside their
+  bounded monitoring window, preventing an accumulating historical backlog.
+
+### Changed
+
+- Expand regression coverage for broadcast timing, overlapping recovery,
+  monitoring expiry, and task cancellation; synchronize architecture and usage
+  documentation.
+
 ## v2.0.2 - 2026-09-08
 
 ### Security

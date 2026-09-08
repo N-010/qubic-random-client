@@ -75,25 +75,30 @@ does not persist preimages and therefore waits until that exact slot disappears.
 
 ## Main loop
 
-The engine wakes every 500 ms:
+The engine uses a 100 ms interval, skipping missed wakeups instead of accumulating
+catch-up cycles:
 
-1. Fetch tick metadata. Failure aborts only this cycle and is retried.
+1. Fetch fresh tick metadata with a two-second timeout. Failure aborts only this
+   cycle and is retried; an old tick is never substituted to schedule a send.
 2. Update epoch/warmup/drain phase from epoch number, initial tick, and UTC time.
-3. Harvest the previous delayed tick-data check and start at most one due check.
-4. Harvest the previous provider-status query and start at most one next query.
-5. Harvest independent broadcast tasks.
-6. Apply a fresh status observation to each exact `(stream, tier)` state.
-7. While active, start eligible absent streams and extend known chains.
-8. During pre-epoch drain or shutdown, freeze normal planning and schedule safe
+3. Harvest the previous provider-status query and independent broadcast tasks.
+4. Apply a fresh status observation to each exact `(stream, tier)` state.
+5. While active, start eligible absent streams and extend known chains.
+6. During pre-epoch drain or shutdown, freeze normal planning and schedule safe
    terminal reveals.
-9. Expire missed calls, dispatch eligible calls, finish drains, and prune old
+7. Expire missed calls, dispatch eligible calls, finish drains, and prune old
    accepted calls.
+8. Start at most one provider-status query, with at least 500 ms between starts.
+9. Expire old monitoring checks, harvest a completed check, and start at most one
+   eligible check unless draining or shutting down.
 
 Status, transaction broadcasts, and the single delayed tick-data check are
 separate bounded Tokio tasks. A slow or failed request does not serialize the
 other streams. The engine aborts its status, broadcast, and tick-data tasks on
 reset and all owned tasks on drop. A cancellation-safe shutdown observer
-remains active while tick calls are awaited.
+remains active while tick calls are awaited. Broadcast dispatch precedes new
+status and monitoring requests; faster tick polling does not increase the
+provider-status request limit.
 
 ## Contract and scheduling invariants
 
@@ -101,7 +106,8 @@ remains active while tick calls are awaited.
 - A stream `s` targets only ticks where `tick % 3 == s`.
 - Consecutive calls in one uninterrupted chain are exactly three ticks apart.
 - A fresh first target is the first matching stream tick at or after
-  `current_tick + 6` and, after a restart, later than the discarded signed tail.
+  `current_tick + 6` and, after a restart, at least three ticks after the old
+  signed tail. Its broadcast may overlap delivery of that old tail.
 - A planned transaction becomes broadcast-eligible at most six ticks before
   its immutable target. If polling skips that boundary, it is still sent while
   the target remains future.
@@ -110,6 +116,17 @@ remains active while tick calls are awaited.
   until its target. Reveal, commitment, tick, signature, and transaction ID
   are never regenerated or retargeted. Nothing is broadcast at or after the
   target.
+- While `Starting` or `Active`, an accepted first commit or normal call gets
+  one additional identical-byte broadcast when its target is four ticks away
+  (or three if polling skips that boundary). Core constructs target `T`'s
+  transaction set at `T - 2`; no additional attempt starts at or after that
+  publication boundary. This best-effort dissemination attempt does
+  not change acceptance, delivery counters, or monitoring deduplication; a
+  failure is logged without another retry. No additional attempt starts for
+  the old frozen tail or during drain, and terminal reveals are excluded.
+  A prepared replacement follows the normal additional-broadcast policy.
+  An outstanding attempt
+  is cancelled at its target, chain removal, epoch reset, or process drop.
 - RPC acceptance requires both a non-empty transaction identifier and a
   positive `peersBroadcasted` count. A zero or invalid peer count is a
   temporary delivery failure and retains the identical-byte retry policy.
@@ -120,9 +137,11 @@ remains active while tick calls are awaited.
   freezes the chain. Status advancement clears the suspicion; duplicate or
   regressing request ticks do not advance it, and a regressing local tick is
   treated as stale.
-- While `Starting` or `Active`, if any required target arrives without backend
-  acceptance, that local chain stops and waits for a status query requested
-  after the discontinuity. `Restarting` follows its frozen-tail rule below.
+- While `Starting` or `Active`, if any required target in the current chain
+  arrives without backend acceptance, that local chain stops and waits for a
+  status query requested after the discontinuity. Expiry of a retained old
+  call cannot stop the replacement. `Restarting` follows its frozen-tail rule
+  below.
 - Backend acceptance proves only submission to the backend, not execution by
   the contract.
 - Preimages use OS randomness, commitments use KangarooTwelve, and secrets stay
@@ -132,7 +151,14 @@ Procedure input is always 544 bytes: 512 reveal bytes followed by 32 commitment
 bytes. `GetProviderStatus` input is the raw 32-byte public key and output is the
 strict 680-byte aligned layout in `docs/Random.h`.
 
-Transport retries may present identical signed bytes more than once. If that
+The publication offset is traced to `TICK_TRANSACTIONS_PUBLICATION_OFFSET = 2`
+and `processTick()` in Core `src/qubic.cpp`, revision
+`f55b46126c99a1c3f3266164c744b3d0cd694d9c`. Arriving before execution alone does
+not establish inclusion; dissemination must reach the leader before selection.
+The primary identical-byte retry policy remains bounded by the immutable target.
+
+Transport retries and the additional broadcast may present identical signed
+bytes more than once. If that
 reaches the contract twice in the target tick, `Random.h` rejects the second
 normal reveal through its same-tick flag and rejects the second first commit
 because the provider is already present; both paths refund and return without
@@ -160,13 +186,23 @@ An accepted or failed financial target is queued once for a delayed check. By
 default the check becomes eligible after 10 ticks and at most one check is
 active; the scan interval defaults to 600 ms. `--reveal-verify-after` and
 `--empty-check-ms` configure positive values. A backend error or timeout
-requeues the check without changing counters. Waiting targets are promoted only
-after their tick delay. Ready checks are ordered by next-attempt time, with tick
-as the tie-breaker. An error delays that target by 1, 2, 4, 8, 16, then 30 seconds
-for all subsequent retries; it cannot block other ready targets. The scan
-interval still limits all starts. Deduplication includes waiting, ready, active,
-and completed checks. Retries continue until success or epoch reset/drop, with
-no age-based eviction. A non-empty result preserves the
+requeues the check without changing counters. Each attempt has a two-second
+timeout. Waiting targets are promoted only after their tick delay, and the
+newest eligible target takes priority over older checks and retries. An error
+delays that target by 1, 2, 4, 8, 16, then 30 seconds for subsequent retries
+within its monitoring window. The scan interval still limits all starts.
+
+The monitoring window ends 32 ticks after the configured eligibility delay
+(42 ticks after the target with defaults); its last tick is inclusive. Older
+waiting and ready checks are discarded and an older active check is cancelled
+before its result can affect counters. The expiry watermark never moves
+backwards within an epoch, preventing old checks from being queued again.
+Deduplication covers waiting, ready, active, and completed checks within this
+window; the watermark replaces expired deduplication entries. Expiry leaves
+the existing outcome unverified and does not classify it as empty or failed.
+Skipped checks are reported in aggregate at most once per minute. This is a
+local monitoring budget, not the contract's transaction-acceptance window.
+Epoch reset clears the window and all checks. A non-empty result preserves the
 current outcome; an empty result moves one outcome from `ok` or `failed` to
 `empty`.
 
@@ -197,15 +233,19 @@ have been applied.
 | State | Meaning | Principal exits |
 | --- | --- | --- |
 | `Waiting` | No usable local chain. It may be waiting for a fresh absence or for a restart target window. | `Starting` after one eligible absent status response; remains waiting while occupied. |
-| `Starting` | A fresh first commit and its predictive continuation are locally known. | `Active` after one owned status response; `Restarting` after three consistent eligible absent or foreign responses; `Draining` when requested. |
+| `Starting` | A fresh first commit and its predictive continuation are locally known; older frozen calls may still be in delivery. | `Active` after one owned status response; `Restarting` after three consistent eligible absent or foreign responses; `Draining` when requested. |
 | `Active` | The local reveal/commit chain is continuously extended. | `Restarting` after three consistent observations of status absence, a foreign target, or acknowledgement lag; `Waiting` after a missed target; `Draining` when requested. |
-| `Restarting` | Status made the local chain untrustworthy. Planning is frozen, but its already signed six-tick tail keeps its normal delivery policy. | `Waiting` after the frozen tail finishes; `Drained` if epoch drain or shutdown was requested. |
+| `Restarting` | Status made the local chain untrustworthy. Planning of that chain is frozen, but its already signed six-tick tail keeps its normal delivery policy. | `Starting` after eligible exact absence, even before the tail finishes; otherwise `Waiting` after the tail finishes, or `Drained` if epoch drain or shutdown was requested. |
 | `Draining` | Normal planning is frozen and a terminal reveal follows the frozen tail. | `Drained` after acceptance or failure/expiry. |
 | `Drained` | No more transactions are created in this epoch or shutdown flow. | `Waiting` only after an observed epoch-number change. |
 
 The chain owns its first target, signed tail, outstanding preimage, and planned
-immutable transactions. Invalid combinations are represented by the enum and
-`Option<Chain>` rather than independent flags.
+immutable transactions. During an overlapping restart its call queue also
+retains the older signed calls and their in-flight tasks. Targets below the
+new first target are transport-only remnants: they cannot acknowledge the new
+chain, trigger its failure, or gate its terminal reveal. No extra state flag
+is needed; the first-target boundary distinguishes them. Invalid combinations
+are represented by the enum and `Option<Chain>` rather than independent flags.
 
 ## Status-driven restart
 
@@ -229,19 +269,29 @@ until the response was requested after the first target could execute.
 The first two consistent observations are logged as non-terminal suspicions and
 normal planning continues. The third status absence, non-regressing foreign
 target, or unchanged acknowledgement lag freezes the current signed tail
-instead of aborting it. No new calls are then planned, while all already signed
+instead of aborting it. No new calls extend that old chain, while all already signed
 calls through the old six-tick horizon retain identical-byte retry until
 backend acceptance or target expiry. Expiry of one call during this frozen
 disposal does not prevent later signed calls from being attempted. Once the
-tail target is reached, its transactions and preimages are discarded. No
-terminal reveal is created because the outstanding preimage is no longer
-trusted.
+tail target is reached, its remaining transactions are discarded. Its
+outstanding preimage is discarded when a replacement is prepared or when the
+old chain finishes without one. No terminal reveal is created for the old
+chain because its outstanding preimage is no longer trusted.
 
 A replacement still requires one successfully decoded observation that reports
 the exact slot absent. An eligible absence observed while the tail is frozen is
-retained unless a later status reports the slot occupied again. The replacement
-first target is the matching stream tick at or after both `current + 6` and
-`old_tail + 3`; if farther away, broadcast waits for the fixed six-tick window.
+retained unless a later status reports the slot occupied again before a
+replacement is prepared. During the active epoch, that absence permits
+preparing the replacement immediately, without waiting for the old tail's
+target. Its first target is the matching stream tick at or after both
+`current + 6` and `old_tail + 3`; if farther away, broadcast waits for the fixed
+six-tick window. The slot enters `Starting`, keeps the old calls' immutable
+bytes and retry tasks, and schedules the new chain normally. Once prepared,
+the replacement follows the usual `Starting` status rules and is never
+retargeted. Old calls expire independently without another financial failure;
+their backend acceptances retain the existing counter and monitoring policy.
+Expired old calls are pruned outside drain; during drain they are released
+with the completed chain.
 
 After a locally missed target, one absent response from a query requested after
 the discontinuity permits a fresh chain. The client never sends a speculative
@@ -280,9 +330,11 @@ Pre-epoch drain is intentionally retained:
 Slots without a known chain require no terminal call. Contract status is not
 used to start a replacement while the epoch is draining.
 
-If status recovery already marked a chain untrustworthy, pre-epoch drain lets
-its frozen signed tail finish but never appends a terminal reveal. The slot then
-remains drained until the new epoch.
+If status recovery has not yet prepared a replacement, pre-epoch drain lets
+the old frozen signed tail finish but never appends a terminal reveal or
+starts a replacement. Once a replacement is prepared, drain terminates that
+new chain normally; retained old calls are not prerequisites for its terminal
+reveal. The slot then remains drained until the new epoch.
 
 ## Graceful shutdown
 
@@ -303,9 +355,11 @@ If shutdown arrives during an existing pre-epoch drain, it waits on that
 already frozen drain under the same overall deadline; it does not create a
 second terminal transaction.
 
-If shutdown arrives during status recovery, it waits for the already frozen
-signed tail under the same deadline and does not create a terminal reveal for
-the untrustworthy chain.
+If shutdown arrives during status recovery before a replacement is prepared,
+it waits for the already frozen signed tail under the same deadline and does
+not create a terminal reveal for the untrustworthy chain. A prepared
+replacement is drained normally, without making its terminal reveal depend on
+the retained old calls.
 
 ## Backend boundary
 
