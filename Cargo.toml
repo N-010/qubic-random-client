@@ -1,6 +1,6 @@
 [package]
 name = "random-client"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2024"
 description = "Provider client for the Qubic Random smart contract"
 license = "MIT"
@@ -8,7 +8,7 @@ repository = "https://github.com/N-010/qubic-random-client"
 readme = "README.md"
 
 [dependencies]
-scapi = { git = "https://github.com/N-010/scapi", version = "0.3.0", rev = "1fa87a247c81254918d3bdeb772066ae8858402c" }
+scapi = { git = "https://github.com/N-010/scapi", version = "0.3.0", rev = "f709b161b72413c3e5fe8447fcbb68a200d3e482", default-features = false }
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

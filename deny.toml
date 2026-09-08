@@ -6,13 +6,7 @@ targets = [
 all-features = true
 
 [advisories]
-# cargo-audit also ignores RUSTSEC-2024-0388: `derivative` is a target-specific
-# SCAPI/Alloy transitive that cargo-deny filters from the supported target graph;
-# removing it requires an upstream SCAPI dependency change.
-ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "Unmaintained transitive dependency in Alloy; no compatible maintained replacement is available through the pinned SCAPI revision." },
-    { id = "RUSTSEC-2025-0134", reason = "Unmaintained reqwest 0.11 helper pulled by walletconnect-sdk through SCAPI; removal requires an upstream SCAPI dependency change." },
-]
+ignore = []
 
 [licenses]
 confidence-threshold = 0.8

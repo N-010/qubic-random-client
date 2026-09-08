@@ -49,6 +49,11 @@ transport port selected by CLI; the engine contains no backend-specific
 branches. SCAPI remains responsible for wallet/identity handling, transaction
 construction and signing, and the existing RPC and Bob clients.
 
+SCAPI is pinned to an immutable revision with default features disabled. The
+client uses its Qubic APIs without the optional native WalletConnect module,
+CLI, or WalletConnect/Ethereum dependency graph. This keeps unused HTTP stacks
+out of the client while preserving SCAPI's signing and protocol behavior.
+
 ## Startup flow
 
 1. Configuration accepts a 55-character lowercase seed, one backend, an

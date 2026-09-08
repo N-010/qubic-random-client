@@ -13,11 +13,15 @@ The client supports three network backends:
 
 ## Release status
 
-RandomClient v2.0.1 is a source release. Build and run the tagged checkout;
-packaged binaries and checksums are not included.
+RandomClient v2.0.2 can be built from the tagged checkout. Successful tag
+workflows also publish Linux and Windows binaries to GitHub Releases.
 
-For the `grpc` backend, use QubicLightNode v2.0.1 with the matching
+For the `grpc` backend, use QubicLightNode v2.0.2 with the matching
 `proto/lightnode.proto` schema.
+
+The pinned SCAPI dependency is built without its optional WalletConnect
+integration. Qubic signing, RPC, and Bob remain available; the unused
+WalletConnect/Ethereum dependencies are excluded from this client.
 
 ## Requirements
 
