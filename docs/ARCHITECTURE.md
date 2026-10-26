@@ -564,6 +564,22 @@ The client cannot guarantee a reveal while the process, host, network, or
 backend is unavailable through the target tick. Collateral loss from such an
 outage is an inherent commit/reveal risk.
 
+## Build and release pipeline
+
+GitHub Actions checks Windows and Linux builds using `rust-toolchain.toml` as
+the Rust version source. Pushes, pull requests, and manual runs execute quality
+and dependency-security checks; the weekly schedule runs security checks only.
+Jobs have explicit timeouts, and newer runs do not cancel running tag workflows.
+
+Only pushed `v*` tags can release. The tag must match the package version before
+building. Both platform binaries must pass version and help checks, then are
+uploaded as separate workflow artifacts with SHA256 checksums. A single publish
+job waits for the whole build matrix, requires both artifacts, verifies their
+checksums, and publishes both binaries and `SHA256SUMS`. Only this job receives
+repository write permission. Remote asset uploads are not an atomic transaction;
+a publication error must be resolved before treating the release as complete.
+This pipeline does not run a wallet or submit transactions.
+
 ## Change consistency checklist
 
 Before implementation, read this file fully, identify affected invariants, and

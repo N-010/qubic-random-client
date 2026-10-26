@@ -14,7 +14,10 @@ The client supports three network backends:
 ## Release status
 
 RandomClient v2.0.3 can be built from the tagged checkout. Successful tag
-workflows also publish Linux and Windows binaries to GitHub Releases.
+workflows publish Linux and Windows binaries together with `SHA256SUMS` to
+GitHub Releases. A release tag must equal `v` followed by the package version
+in `Cargo.toml`. Both platform builds must pass `--version` and `--help` checks;
+one publication job verifies both artifacts and their checksums before upload.
 
 For the `grpc` backend, use QubicLightNode v2.0.2 with the matching
 `proto/lightnode.proto` schema.
@@ -191,6 +194,9 @@ cargo test --all-targets --all-features --locked
 ```
 
 CI also enforces the dependency policies in [`deny.toml`](deny.toml) with
-`cargo-audit` and `cargo-deny`. See [`SECURITY.md`](SECURITY.md) for private
+`cargo-audit` and `cargo-deny`. Security checks also run every Monday at 06:23
+UTC on the default branch. CI can be started manually; only a pushed `v*` tag
+can trigger release publication. All Rust jobs use `rust-toolchain.toml`.
+See [`SECURITY.md`](SECURITY.md) for private
 vulnerability reporting, [`CHANGELOG.md`](CHANGELOG.md) for release changes,
 and [`LICENSE`](LICENSE) for the MIT license.
