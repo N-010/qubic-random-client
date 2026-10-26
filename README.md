@@ -13,7 +13,7 @@ The client supports three network backends:
 
 ## Release status
 
-RandomClient v2.0.3 can be built from the tagged checkout. Successful tag
+The current source version is RandomClient v2.1.0. Successful tag
 workflows publish Linux and Windows binaries together with `SHA256SUMS` to
 GitHub Releases. A release tag must equal `v` followed by the package version
 in `Cargo.toml`. Both platform builds must pass `--version` and `--help` checks;

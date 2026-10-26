@@ -1,6 +1,6 @@
 [package]
 name = "random-client"
-version = "2.0.3"
+version = "2.1.0"
 edition = "2024"
 description = "Provider client for the Qubic Random smart contract"
 license = "MIT"
