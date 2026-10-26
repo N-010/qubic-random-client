@@ -1,7 +1,8 @@
 use scapi::QubicWallet;
+use std::time::Duration;
 
 use crate::backend::create_backend;
-use crate::config::{AppConfig, redacted_endpoint};
+use crate::config::{AppConfig, BackendKind, redacted_endpoint};
 use crate::engine::ProviderEngine;
 
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -26,7 +27,11 @@ pub async fn run(config: AppConfig) -> AppResult<()> {
         config.reveal_check_delay_ticks,
     );
     drop(config.seed);
-    engine.run(wait_for_shutdown_signal()).await
+    let poll_interval = Duration::from_millis(match config.backend {
+        BackendKind::Grpc => 20,
+        BackendKind::Rpc | BackendKind::Bob => 100,
+    });
+    engine.run(wait_for_shutdown_signal(), poll_interval).await
 }
 
 async fn wait_for_shutdown_signal() -> AppResult<()> {

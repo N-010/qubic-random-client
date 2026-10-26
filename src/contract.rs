@@ -47,6 +47,7 @@ impl ProviderStatus {
         }
 
         let mut slots = Vec::with_capacity(count);
+        let mut seen_slots = 0u32;
         for index in 0..count {
             let stream = read_u32(bytes, STREAMS_OFFSET + index * 4)?;
             let tier = read_u32(bytes, TIERS_OFFSET + index * 4)?;
@@ -66,6 +67,13 @@ impl ProviderStatus {
                     "slot {index} has invalid contribution flag {contributed}"
                 )));
             }
+            let slot_bit = 1u32 << (stream * 10 + tier);
+            if seen_slots & slot_bit != 0 {
+                return Err(ContractCodecError(format!(
+                    "slot {index} duplicates stream {stream}, tier {tier}"
+                )));
+            }
+            seen_slots |= slot_bit;
             slots.push(ProviderSlot {
                 key: SlotKey {
                     stream: stream as u8,
@@ -84,10 +92,16 @@ impl ProviderStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RevealAndCommitInput {
     pub reveal: [u8; 512],
     pub commit: [u8; 32],
+}
+
+impl fmt::Debug for RevealAndCommitInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RevealAndCommitInput(REDACTED)")
+    }
 }
 
 impl RevealAndCommitInput {
@@ -170,6 +184,9 @@ mod tests {
         fn valid_layout_roundtrips(
             slots in prop::collection::vec(provider_slot_strategy(), 0..=MAX_PROVIDER_SLOTS)
         ) {
+            let mut slots = slots;
+            let mut keys = std::collections::HashSet::new();
+            slots.retain(|slot| keys.insert(slot.key));
             let decoded = ProviderStatus::decode(&encode_status(&slots)).unwrap();
             prop_assert_eq!(decoded, ProviderStatus { slots });
         }
@@ -178,6 +195,45 @@ mod tests {
         fn every_wrong_size_is_rejected(size in 0usize..1000) {
             prop_assume!(size != PROVIDER_STATUS_SIZE);
             prop_assert!(ProviderStatus::decode(&vec![0; size]).is_err());
+        }
+    }
+
+    #[test]
+    fn reveal_input_debug_redacts_secret_bytes() {
+        let input = RevealAndCommitInput {
+            reveal: [173; 512],
+            commit: [94; 32],
+        };
+        assert_eq!(format!("{input:?}"), "RevealAndCommitInput(REDACTED)");
+        assert_eq!(format!("{input:#?}"), "RevealAndCommitInput(REDACTED)");
+        assert_eq!(
+            input.encode(),
+            [[173; 512].as_slice(), [94; 32].as_slice()].concat()
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_duplicate_provider_slots() {
+        let slot = ProviderSlot {
+            key: SlotKey {
+                stream: 1,
+                collateral_tier: 1,
+            },
+            locked_collateral: 10,
+            contributed_to_entropy: false,
+            last_update_tick: 100,
+        };
+        let mut conflicting = slot.clone();
+        conflicting.last_update_tick = 103;
+        for slots in [
+            vec![slot.clone(), conflicting.clone()],
+            vec![conflicting, slot.clone()],
+            vec![slot.clone(), slot],
+        ] {
+            assert!(
+                ProviderStatus::decode(&encode_status(&slots)).is_err(),
+                "duplicate slot accepted"
+            );
         }
     }
 

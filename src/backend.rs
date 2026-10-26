@@ -3,12 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::http::{
+    BoundedBobClient as BobRpcClient, BoundedRpcClient as RpcClient, broadcast_transaction_with,
+    get_tick_data_with, get_tick_info_with,
+};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use scapi::bob::BobRpcClient;
-use scapi::rpc::post::broadcast_transaction_with;
-use scapi::rpc::{RpcClient, get_tick_data_with, get_tick_info_with};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::time::{Instant, sleep};
@@ -21,6 +22,39 @@ use crate::config::{AppConfig, BackendKind};
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
 const BOB_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_TICK_DURATION_MS: u32 = 1_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickTransactions {
+    pub has_transactions: bool,
+    // None means the backend did not supply a complete authenticated digest set.
+    pub transaction_digests: Option<Vec<[u8; 32]>>,
+}
+
+impl From<bool> for TickTransactions {
+    fn from(has_transactions: bool) -> Self {
+        Self {
+            has_transactions,
+            transaction_digests: None,
+        }
+    }
+}
+
+impl TickTransactions {
+    pub fn contains(&self, digest: &[u8; 32]) -> Option<bool> {
+        self.transaction_digests
+            .as_ref()
+            .map(|digests| digests.contains(digest))
+    }
+}
+
+pub(crate) fn transaction_digest(bytes: &[u8]) -> [u8; 32] {
+    use tiny_keccak::{Hasher, KangarooTwelve};
+    let mut hasher = KangarooTwelve::new(b"");
+    hasher.update(bytes);
+    let mut digest = [0; 32];
+    hasher.finalize(&mut digest);
+    digest
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TickInfo {
@@ -57,7 +91,7 @@ impl std::error::Error for BackendError {}
 #[async_trait]
 pub trait NetworkBackend: Send + Sync {
     async fn tick_info(&self) -> Result<TickInfo, BackendError>;
-    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError>;
+    async fn tick_has_transactions(&self, tick: u32) -> Result<TickTransactions, BackendError>;
     async fn query_contract_function(
         &self,
         request: ContractFunctionRequest,
@@ -73,22 +107,26 @@ pub fn create_backend(config: &AppConfig) -> Result<Arc<dyn NetworkBackend>, Bac
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RpcBackend {
     live: RpcClient,
     query: RpcClient,
 }
 
+impl std::fmt::Debug for RpcBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcBackend").finish_non_exhaustive()
+    }
+}
+
 impl RpcBackend {
     fn new(root: &str) -> Self {
         Self {
-            live: RpcClient::with_base_url(Cow::Owned(format!(
-                "{}/live/v1",
-                root.trim_end_matches('/')
+            live: RpcClient::with_base_url(Cow::Owned(crate::config::append_endpoint_path(
+                root, "live/v1",
             ))),
-            query: RpcClient::with_base_url(Cow::Owned(format!(
-                "{}/query/v1",
-                root.trim_end_matches('/')
+            query: RpcClient::with_base_url(Cow::Owned(crate::config::append_endpoint_path(
+                root, "query/v1",
             ))),
         }
     }
@@ -108,7 +146,7 @@ impl NetworkBackend for RpcBackend {
     async fn tick_info(&self) -> Result<TickInfo, BackendError> {
         let response = get_tick_info_with(&self.live)
             .await
-            .map_err(|err| BackendError::new(format!("RPC tick-info failed: {err}")))?;
+            .map_err(|_| BackendError::new("RPC tick-info failed"))?;
         Ok(TickInfo {
             epoch: response.tick_info.epoch,
             tick: response.tick_info.tick,
@@ -117,15 +155,17 @@ impl NetworkBackend for RpcBackend {
         })
     }
 
-    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError> {
-        get_tick_data_with(&self.query, tick)
+    async fn tick_has_transactions(&self, tick: u32) -> Result<TickTransactions, BackendError> {
+        let response = get_tick_data_with(&self.query, tick)
             .await
-            .map(|response| {
-                response
-                    .tick_data
-                    .is_some_and(|tick_data| !tick_data.transaction_hashes.is_empty())
-            })
-            .map_err(|err| BackendError::new(format!("RPC tick-data query failed: {err}")))
+            .map_err(|_| BackendError::new("RPC tick-data query failed"))?;
+        match response.tick_data {
+            Some(data) if data.tick_number != tick => {
+                Err(BackendError::new("RPC returned a different tick"))
+            }
+            Some(data) => Ok((!data.transaction_hashes.is_empty()).into()),
+            None => Ok(false.into()),
+        }
     }
 
     async fn query_contract_function(
@@ -143,7 +183,7 @@ impl NetworkBackend for RpcBackend {
             .live
             .post_json_value("querySmartContract", &payload)
             .await
-            .map_err(|err| BackendError::new(format!("RPC contract query failed: {err}")))?;
+            .map_err(|_| BackendError::new("RPC contract query failed"))?;
         decode_rpc_contract_response(value)
     }
 
@@ -165,20 +205,21 @@ fn decode_rpc_contract_response(value: Value) -> Result<Vec<u8>, BackendError> {
     let encoded = ["responseData", "data", "result"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(Value::as_str))
-        .ok_or_else(|| {
-            BackendError::new(format!(
-                "RPC contract response contains no base64 output: {value}"
-            ))
-        })?;
+        .ok_or_else(|| BackendError::new("RPC contract response contains no base64 output"))?;
     BASE64_STANDARD
         .decode(encoded)
         .map_err(|err| BackendError::new(format!("RPC returned invalid base64 output: {err}")))
 }
 
-#[derive(Debug)]
 struct BobBackend {
     rpc: Arc<BobRpcClient>,
     next_nonce: AtomicU64,
+}
+
+impl std::fmt::Debug for BobBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BobBackend").finish_non_exhaustive()
+    }
 }
 
 impl BobBackend {
@@ -201,7 +242,7 @@ impl NetworkBackend for BobBackend {
             self.rpc
                 .qubic_status()
                 .await
-                .map_err(|err| BackendError::new(format!("Bob status failed: {err}")))?,
+                .map_err(|_| BackendError::new("Bob status failed"))?,
         )
         .map_err(BackendError::new)?;
         let epoch = checked_u32_field(&result, "currentProcessingEpoch")?;
@@ -220,7 +261,7 @@ impl NetworkBackend for BobBackend {
         })
     }
 
-    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError> {
+    async fn tick_has_transactions(&self, tick: u32) -> Result<TickTransactions, BackendError> {
         let result = extract_result(
             self.rpc
                 .qubic_get_transfers(json!({
@@ -229,10 +270,10 @@ impl NetworkBackend for BobBackend {
                     "toTick": tick,
                 }))
                 .await
-                .map_err(|err| BackendError::new(format!("Bob tick-data query failed: {err}")))?,
+                .map_err(|_| BackendError::new("Bob tick-data query failed"))?,
         )
         .map_err(BackendError::new)?;
-        bob_tick_has_transactions(&result)
+        bob_tick_has_transactions(&result).map(Into::into)
     }
 
     async fn query_contract_function(
@@ -252,18 +293,14 @@ impl NetworkBackend for BobBackend {
                 self.rpc
                     .call("qubic_querySmartContract", params.clone())
                     .await
-                    .map_err(|err| {
-                        BackendError::new(format!("Bob contract query failed: {err}"))
-                    })?,
+                    .map_err(|_| BackendError::new("Bob contract query failed"))?,
             )
             .map_err(BackendError::new)?;
             if let Some(data) = extract_string_field(&result, &["data"]) {
                 return decode_hex(data.trim_start_matches("0x"));
             }
-            if let Some(error) = extract_string_field(&result, &["error"]) {
-                return Err(BackendError::new(format!(
-                    "Bob contract query failed: {error}"
-                )));
+            if extract_string_field(&result, &["error"]).is_some() {
+                return Err(BackendError::new("Bob contract query failed"));
             }
             if Instant::now() >= deadline {
                 return Err(BackendError::new(format!(
@@ -308,7 +345,7 @@ fn bob_tick_has_transactions(result: &Value) -> Result<bool, BackendError> {
 
 fn checked_u32_field(value: &Value, key: &str) -> Result<u32, BackendError> {
     let value = extract_u64_field(value, &[key])
-        .ok_or_else(|| BackendError::new(format!("Bob response missing {key}: {value}")))?;
+        .ok_or_else(|| BackendError::new(format!("Bob response missing {key}")))?;
     u32::try_from(value)
         .map_err(|_| BackendError::new(format!("Bob response {key} is out of range: {value}")))
 }
@@ -386,13 +423,10 @@ impl NetworkBackend for QlnBackend {
         let response = client
             .get_status(Request::new(lightnodepb::GetStatusRequest {}))
             .await
-            .map_err(|err| BackendError::new(format!("QLN status failed: {err}")))?
+            .map_err(|err| BackendError::new(format!("QLN status failed: {}", err.code())))?
             .into_inner();
         if !response.ok {
-            return Err(BackendError::new(format!(
-                "QLN status failed: {}",
-                response.error
-            )));
+            return Err(BackendError::new("QLN status failed"));
         }
         let status = response
             .status
@@ -404,16 +438,18 @@ impl NetworkBackend for QlnBackend {
         Ok(normalize_qln_tick_info(status, &mut fallback))
     }
 
-    async fn tick_has_transactions(&self, tick: u32) -> Result<bool, BackendError> {
+    async fn tick_has_transactions(&self, tick: u32) -> Result<TickTransactions, BackendError> {
         let mut client = self.client.clone();
         let response = client
             .get_tick_transactions(Request::new(lightnodepb::GetTickTransactionsRequest {
                 tick,
             }))
             .await
-            .map_err(|err| BackendError::new(format!("QLN tick-data query failed: {err}")))?
+            .map_err(|err| {
+                BackendError::new(format!("QLN tick-data query failed: {}", err.code()))
+            })?
             .into_inner();
-        qln_tick_has_transactions(response)
+        qln_tick_has_transactions(response, tick)
     }
 
     async fn query_contract_function(
@@ -428,20 +464,24 @@ impl NetworkBackend for QlnBackend {
                 input: request.input,
             }))
             .await
-            .map_err(|err| BackendError::new(format!("QLN contract query failed: {err}")))?
+            .map_err(|err| BackendError::new(format!("QLN contract query failed: {}", err.code())))?
             .into_inner();
         if response.ok {
             Ok(response.output)
         } else {
-            Err(BackendError::new(format!(
-                "QLN contract query failed: {}",
-                response.error
-            )))
+            Err(BackendError::new("QLN contract query failed"))
         }
     }
 
     async fn broadcast_transaction(&self, tx_bytes: Vec<u8>) -> Result<String, BackendError> {
         let mut client = self.client.clone();
+        if let Some(bytes) = tx_bytes.get(72..76) {
+            let tick = u32::from_le_bytes(bytes.try_into().expect("four-byte tick slice"));
+            println!(
+                "Broadcast digest for target {tick}: {}",
+                bytes_to_hex(&transaction_digest(&tx_bytes))
+            );
+        }
         let response = client
             .broadcast_transaction(Request::new(lightnodepb::BroadcastTransactionRequest {
                 tx_bytes,
@@ -459,15 +499,40 @@ impl NetworkBackend for QlnBackend {
 
 fn qln_tick_has_transactions(
     response: lightnodepb::GetTickTransactionsResponse,
-) -> Result<bool, BackendError> {
-    if response.ok {
-        Ok(response.has_transactions)
-    } else {
-        Err(BackendError::new(format!(
-            "QLN tick-data query failed: {}",
-            response.error
-        )))
+    requested_tick: u32,
+) -> Result<TickTransactions, BackendError> {
+    if !response.ok {
+        return Err(BackendError::new("QLN tick-data query failed"));
     }
+    if response.tick != requested_tick {
+        return Err(BackendError::new("QLN returned a different tick"));
+    }
+    if !response.digests_complete {
+        if !response.transaction_digests.is_empty() {
+            return Err(BackendError::new("QLN returned an incomplete digest list"));
+        }
+        return Ok(response.has_transactions.into());
+    }
+    if response.transaction_digests.len() > 4096
+        || response.has_transactions == response.transaction_digests.is_empty()
+    {
+        return Err(BackendError::new("QLN returned inconsistent tick digests"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut digests = Vec::with_capacity(response.transaction_digests.len());
+    for bytes in response.transaction_digests {
+        let digest: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| BackendError::new("QLN returned an invalid digest size"))?;
+        if digest == [0; 32] || !seen.insert(digest) {
+            return Err(BackendError::new("QLN returned a zero or duplicate digest"));
+        }
+        digests.push(digest);
+    }
+    Ok(TickTransactions {
+        has_transactions: response.has_transactions,
+        transaction_digests: Some(digests),
+    })
 }
 
 fn validate_transaction_id(transaction_id: String) -> Result<String, BackendError> {
@@ -502,6 +567,9 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, BackendError> {
     if !value.len().is_multiple_of(2) {
         return Err(BackendError::new("hex output has an odd length"));
     }
+    if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(BackendError::new("hex output contains a non-hex digit"));
+    }
     value
         .as_bytes()
         .chunks_exact(2)
@@ -522,6 +590,149 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn backend_debug_omits_transport_credentials() {
+        let endpoint =
+            "http://test-user:test-password@localhost:50051?token=test-token#test-fragment";
+        let outputs = [
+            format!("{:?}", RpcBackend::new(endpoint)),
+            format!("{:?}", BobBackend::new(endpoint)),
+        ];
+        for output in outputs {
+            for secret in ["test-user", "test-password", "test-token", "test-fragment"] {
+                assert!(
+                    !output.contains(secret),
+                    "Debug exposed endpoint credentials"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_responses_do_not_echo_remote_content() {
+        let value = json!({"error": "credential=example-secret"});
+        assert_eq!(
+            decode_rpc_contract_response(value.clone())
+                .unwrap_err()
+                .to_string(),
+            "RPC contract response contains no base64 output"
+        );
+        assert_eq!(
+            checked_u32_field(&value, "currentProcessingEpoch")
+                .unwrap_err()
+                .to_string(),
+            "Bob response missing currentProcessingEpoch"
+        );
+        assert_eq!(
+            qln_tick_has_transactions(
+                lightnodepb::GetTickTransactionsResponse {
+                    error: "credential=example-secret".into(),
+                    ..Default::default()
+                },
+                1
+            )
+            .unwrap_err()
+            .to_string(),
+            "QLN tick-data query failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_backends_reject_oversized_json_before_decoding() {
+        for chunked in [false, true] {
+            for bob in [false, true] {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let endpoint = format!("http://{}", listener.local_addr().unwrap());
+                let server = std::thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    read_http_request(&mut stream);
+                    let mut body = br#"{"responseData":"AA==","result":{"data":"0x00"}}"#.to_vec();
+                    body.resize(16 * 1024 * 1024 + 1, b' ');
+                    if chunked {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(&body);
+                        let _ = stream.write_all(b"\r\n0\r\n\r\n");
+                    } else {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(&body);
+                    }
+                });
+                let backend: Box<dyn NetworkBackend> = if bob {
+                    Box::new(BobBackend::new(&endpoint))
+                } else {
+                    Box::new(RpcBackend::new(&endpoint))
+                };
+                let result = backend
+                    .query_contract_function(ContractFunctionRequest {
+                        contract_index: 3,
+                        input_type: 2,
+                        input: vec![0; 32],
+                    })
+                    .await;
+                server.join().unwrap();
+                assert!(result.is_err(), "oversized JSON was accepted");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_read_errors_do_not_echo_response_bodies() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                read_http_request(&mut stream);
+                let body = "credential=example-secret";
+                write!(stream, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let endpoint = format!("http://{address}");
+        let backends: Vec<Box<dyn NetworkBackend>> = vec![
+            Box::new(RpcBackend::new(&endpoint)),
+            Box::new(BobBackend::new(&endpoint)),
+        ];
+        let mut errors = Vec::new();
+        for backend in backends {
+            errors.push(backend.tick_info().await.unwrap_err());
+            errors.push(backend.tick_has_transactions(123).await.unwrap_err());
+            errors.push(
+                backend
+                    .query_contract_function(ContractFunctionRequest {
+                        contract_index: 3,
+                        input_type: 1,
+                        input: vec![0; 32],
+                    })
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        server.join().unwrap();
+        for error in errors {
+            assert!(
+                !format!("{error} {error:?}").contains("example-secret"),
+                "remote content leaked"
+            );
+        }
+    }
+
+    #[test]
     fn rpc_response_decodes_supported_output_field() {
         assert_eq!(
             decode_rpc_contract_response(json!({"responseData": "AQID"})).unwrap(),
@@ -535,6 +746,15 @@ mod tests {
         assert_eq!(decode_hex(&bytes_to_hex(&bytes)).unwrap(), bytes);
         assert!(decode_hex("0").is_err());
         assert!(decode_hex("zz").is_err());
+    }
+
+    #[test]
+    fn hex_output_accepts_only_ascii_hex_digit_pairs() {
+        for invalid in ["+0", "+f", "00+a", "-1", " 0", "0 ", "é", "😀", "0\n"] {
+            assert!(decode_hex(invalid).is_err(), "accepted non-hex input");
+        }
+        assert_eq!(decode_hex("00aAFF10").unwrap(), vec![0, 170, 255, 16]);
+        assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
     }
 
     #[test]
@@ -566,11 +786,141 @@ mod tests {
                 tick: 1,
                 has_transactions,
                 error: error.to_string(),
+                ..Default::default()
             };
 
-        assert!(!qln_tick_has_transactions(response(true, false, "")).unwrap());
-        assert!(qln_tick_has_transactions(response(true, true, "")).unwrap());
-        assert!(qln_tick_has_transactions(response(false, false, "unavailable")).is_err());
+        assert_eq!(
+            qln_tick_has_transactions(response(true, false, ""), 1).unwrap(),
+            false.into()
+        );
+        assert_eq!(
+            qln_tick_has_transactions(response(true, true, ""), 1).unwrap(),
+            true.into()
+        );
+        assert!(qln_tick_has_transactions(response(false, false, "unavailable"), 1).is_err());
+        assert!(qln_tick_has_transactions(response(true, true, ""), 2).is_err());
+    }
+
+    #[test]
+    fn qln_full_tick_digest_set_survives_protobuf_roundtrip() {
+        use prost::Message;
+
+        let digests: Vec<[u8; 32]> = (1_u32..=4096)
+            .map(|slot| {
+                let mut digest = [0; 32];
+                digest[..4].copy_from_slice(&slot.to_le_bytes());
+                digest
+            })
+            .collect();
+        let mut response = lightnodepb::GetTickTransactionsResponse {
+            ok: true,
+            tick: u32::MAX,
+            has_transactions: true,
+            transaction_digests: digests.iter().map(|digest| digest.to_vec()).collect(),
+            digests_complete: true,
+            error: String::new(),
+        };
+        let encoded = response.encode_to_vec();
+        assert_eq!(encoded.len(), 139_276);
+        // tonic 0.12's default uncompressed receive limit is 4 MiB.
+        assert!(encoded.len() < 4 * 1024 * 1024);
+        let decoded = lightnodepb::GetTickTransactionsResponse::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded, response);
+        assert_eq!(
+            qln_tick_has_transactions(decoded, u32::MAX).unwrap(),
+            TickTransactions {
+                has_transactions: true,
+                transaction_digests: Some(digests),
+            }
+        );
+        let mut extra = vec![0; 32];
+        extra[..4].copy_from_slice(&4097_u32.to_le_bytes());
+        response.transaction_digests.push(extra);
+        assert!(qln_tick_has_transactions(response, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn qln_complete_digests_compare_the_entire_signed_transaction_hash() {
+        let digest = transaction_digest(b"signed transaction");
+        let mut different = digest;
+        different[31] ^= 1;
+        let response = lightnodepb::GetTickTransactionsResponse {
+            ok: true,
+            tick: 42,
+            has_transactions: true,
+            transaction_digests: vec![digest.to_vec()],
+            digests_complete: true,
+            error: String::new(),
+        };
+        let observation = qln_tick_has_transactions(response.clone(), 42).unwrap();
+        assert_eq!(
+            observation,
+            TickTransactions {
+                has_transactions: true,
+                transaction_digests: Some(vec![digest]),
+            }
+        );
+        assert_eq!(observation.contains(&digest), Some(true));
+        assert_eq!(observation.contains(&different), Some(false));
+        assert_eq!(TickTransactions::from(true).contains(&digest), None);
+        assert_ne!(digest, transaction_digest(b"signed transaction!"));
+
+        let empty = qln_tick_has_transactions(
+            lightnodepb::GetTickTransactionsResponse {
+                has_transactions: false,
+                transaction_digests: vec![],
+                ..response.clone()
+            },
+            42,
+        )
+        .unwrap();
+        assert_eq!(
+            empty,
+            TickTransactions {
+                has_transactions: false,
+                transaction_digests: Some(vec![])
+            }
+        );
+        assert_eq!(empty.contains(&digest), Some(false));
+
+        for digests in [
+            vec![vec![1; 31]],
+            vec![vec![0; 32]],
+            vec![digest.to_vec(); 2],
+            vec![],
+            vec![vec![1; 32]; 4097],
+        ] {
+            assert!(
+                qln_tick_has_transactions(
+                    lightnodepb::GetTickTransactionsResponse {
+                        transaction_digests: digests,
+                        ..response.clone()
+                    },
+                    42
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            qln_tick_has_transactions(
+                lightnodepb::GetTickTransactionsResponse {
+                    digests_complete: false,
+                    ..response.clone()
+                },
+                42
+            )
+            .is_err()
+        );
+        assert!(
+            qln_tick_has_transactions(
+                lightnodepb::GetTickTransactionsResponse {
+                    has_transactions: false,
+                    ..response
+                },
+                42
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -757,6 +1107,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_tick_data_rejects_a_different_tick_even_when_empty() {
+        for hashes in [json!([]), json!(["abc"])] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                read_http_request(&mut stream);
+                let body = json!({"tickData": {
+                    "tickNumber": 124, "epoch": 1, "computorIndex": 0,
+                    "timestamp": "", "varStruct": "", "timeLock": "",
+                    "transactionHashes": hashes, "contractFees": [], "signature": "",
+                }})
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let result = RpcBackend::new(&endpoint).tick_has_transactions(123).await;
+            server.join().unwrap();
+            assert_eq!(
+                result,
+                Err(BackendError::new("RPC returned a different tick"))
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn rpc_tick_data_query_uses_query_route() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -785,9 +1168,18 @@ mod tests {
         });
         let backend = RpcBackend::new(&format!("http://{address}"));
 
-        assert!(!backend.tick_has_transactions(123).await.unwrap());
-        assert!(!backend.tick_has_transactions(123).await.unwrap());
-        assert!(backend.tick_has_transactions(123).await.unwrap());
+        assert_eq!(
+            backend.tick_has_transactions(123).await.unwrap(),
+            false.into()
+        );
+        assert_eq!(
+            backend.tick_has_transactions(123).await.unwrap(),
+            false.into()
+        );
+        assert_eq!(
+            backend.tick_has_transactions(123).await.unwrap(),
+            true.into()
+        );
         for request in server.join().unwrap() {
             assert!(request.starts_with("POST /query/v1/getTickData HTTP/1.1\r\n"));
             assert!(request.contains(r#""tickNumber":123"#));

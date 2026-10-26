@@ -8,7 +8,7 @@ transactions.
 The client supports three network backends:
 
 - `rpc` — Qubic HTTP RPC;
-- `bob` — Bob JSON-RPC through SCAPI;
+- `bob` — Bob JSON-RPC;
 - `grpc` — QubicLightNode gRPC.
 
 ## Release status
@@ -22,6 +22,11 @@ For the `grpc` backend, use QubicLightNode v2.0.2 with the matching
 The pinned SCAPI dependency is built without its optional WalletConnect
 integration. Qubic signing, RPC, and Bob remain available; the unused
 WalletConnect/Ethereum dependencies are excluded from this client.
+
+RPC and Bob HTTP responses are limited to 16 MiB before JSON parsing, including
+chunked responses. Larger responses fail the attempt and follow the normal retry
+policy. HTTP error bodies are discarded without reading them. The bounded
+transport preserves SCAPI's request formats and RPC models; signing stays in SCAPI.
 
 ## Requirements
 
@@ -65,7 +70,7 @@ options are:
 | `--endpoint <URL>` | Backend-specific | Override the selected backend endpoint. |
 | `--collateral <AMOUNT>` | `10000` | Select the Random collateral tier. |
 | `--seed <SEED>` | Hidden input | Supply the 55-letter Qubic seed. |
-| `--empty-check-ms <MILLISECONDS>` | `600` | Set the retry interval for delayed empty-tick checks. |
+| `--empty-check-ms <MILLISECONDS>` | `600` | Set the minimum interval between starts of delayed tick checks. |
 | `--reveal-verify-after <TICKS>` | `10` | Delay verification of a financial target. |
 | `--stop-before-epoch-end-secs <SECONDS>` | `600` | Begin proactive drain before the epoch boundary. |
 | `--resume-after-epoch-start-ticks <TICKS>` | `50` | Delay enrollment after a new epoch begins. |
@@ -85,14 +90,19 @@ Both empty-tick timing options must be greater than zero.
 
 - The process manages one chain per Random stream for the selected identity and
   collateral tier. Run exactly one writer for that identity/tier combination.
-- The engine polls ticks every 100 ms and dispatches transactions before new
+- The engine polls ticks every 20 ms for gRPC and 100 ms for RPC/Bob, and
+  dispatches transactions before new
   background queries. Provider-status queries remain limited to two per second.
-- Each stream uses its assigned three-tick sequence. Transactions become
-  eligible for broadcast six ticks before their immutable target tick.
+- Each stream uses its assigned three-tick sequence and plans six ticks ahead.
+  First commits become eligible for broadcast six ticks before their immutable
+  target. Normal and terminal reveals wait until four ticks before target,
+  including retries and retained old tails.
 - A temporary delivery failure retries identical signed bytes until the target
   tick. A backend acceptance is not proof of contract execution.
-- An accepted first commit or normal call gets one additional identical-byte
-  send four ticks before its target (three if polling skips that boundary).
+- An accepted first commit gets one additional identical-byte send four ticks
+  before its target (three if polling skips that boundary). An accepted normal
+  reveal gets its additional send at three ticks before target, separating it
+  from the first send at four ticks before target.
   No extra send starts at or after Core's two-tick publication boundary.
   Its result does not change delivery counters. No extra sends start for the
   old frozen tail or during drain, and terminal reveals are excluded.
@@ -123,12 +133,23 @@ the counters. No new checks start during drain or shutdown. Monitoring can
 skip targets under load; `empty = 0` does not establish that all ticks were
 checked successfully. This monitoring window does not change the SC schedule.
 
+With the updated LightNode, delayed checks also log `TickData inclusion for
+target T: included / missing / unknown`. The client compares the full 32-byte
+K12 hash of its signed transaction against the authenticated TickData digest
+list. An old LightNode, RPC, or Bob provides `unknown` for this check. These
+observations do not change `Sends` counters or restart decisions and do not
+prove successful contract execution or consensus finality. Upgrade both
+LightNode and this client to enable inclusion checking; no new CLI flag is needed.
+
 The complete scheduling, recovery, epoch, and shutdown state machines are
 specified in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). A non-normative
 Russian translation is available in
 [`docs/ARCHITECTURE.ru.md`](docs/ARCHITECTURE.ru.md).
 
 ## Backend trust and protocol
+
+The gRPC adapter logs the target and full locally computed transaction digest
+for offline inclusion checks, without signed payloads or preimages.
 
 RPC and Bob obtain provider status through their contract-query endpoints.
 QubicLightNode returns one structurally valid peer response for contract
@@ -141,10 +162,19 @@ and contract-query observations are peer-trusted data, not a Qubic consensus
 proof. QubicLightNode still verifies transaction signatures locally before
 forwarding transactions.
 
-Broadcasting six ticks early reveals preimage material to the selected backend
-before the target tick. Choose and operate that backend according to this
-availability and confidentiality tradeoff. Seeds, preimages, and signed bytes
-are not logged or persisted by the client.
+Broadcast reveals preimages to both the selected backend and Core's P2P peers.
+The client holds reveal-bearing transactions until observed `T - 4`, after the
+preceding round's commitment set is selected at `T - 5` under Core's two-tick
+publication schedule. This protection requires correct backend tick reports;
+it does not authenticate consensus or eliminate selective withholding.
+Bob uses `currentVerifyLoggingTick`: verification lag can delay delivery, and
+switching to a local Bob or QubicLightNode alone does not ensure security or
+timely inclusion. Seeds, preimages, and signed bytes are not logged or persisted.
+
+Entropy is separate per tier. The default `--collateral 10000` supports tier 4;
+use `--collateral 1` to support tier 0. A higher collateral tier does not supply
+entropy to lower tiers. Contract fees are on-chain state and cannot be repaired
+by changing this provider client.
 
 [`docs/Random.h`](docs/Random.h) is the smart-contract source of truth. Random
 Client uses contract index `3`, `RevealAndCommit` procedure `1`, and

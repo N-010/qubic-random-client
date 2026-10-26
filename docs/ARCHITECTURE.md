@@ -38,6 +38,7 @@ randomness, protected seed memory, time, standard input, and shutdown signals.
 | `src/config.rs` | Parse CLI input, normalize endpoints, validate collateral and monitoring intervals, and keep the seed locked and zeroized. |
 | `src/backend.rs` | Define the transport-neutral port and adapt RPC, Bob, and gRPC, including delayed tick-data checks. |
 | `src/bob.rs` | Decode Bob's varying JSON response shapes. |
+| `src/http.rs` | Bound HTTP response bodies and preserve the required SCAPI RPC/Bob request formats. |
 | `src/contract.rs` | Own Random constants and strict wire codecs. |
 | `src/entropy.rs` | Generate 4096-bit preimages and KangarooTwelve commitments. |
 | `src/engine.rs` | Own three stream states, tick scheduling, status-driven restart, retries, delivery counters, tick-data verification, epoch lifecycle, and drains. |
@@ -47,7 +48,10 @@ randomness, protected seed memory, time, standard input, and shutdown signals.
 The project stays flat and small. `NetworkBackend` is the only operational
 transport port selected by CLI; the engine contains no backend-specific
 branches. SCAPI remains responsible for wallet/identity handling, transaction
-construction and signing, and the existing RPC and Bob clients.
+construction and signing, and RPC wire models. The required HTTP calls use a
+small bounded transport because the pinned SCAPI clients expose no response-size
+limit. RPC paths, payloads and Bob JSON-RPC envelopes are checked against that
+pinned implementation in local-server parity tests.
 
 SCAPI is pinned to an immutable revision with default features disabled. The
 client uses its Qubic APIs without the optional native WalletConnect module,
@@ -61,7 +65,11 @@ out of the client while preserving SCAPI's signing and protocol behavior.
    window settings.
 2. A seed omitted from CLI is read without echo or from redirected stdin. Seed
    bytes are locked, redacted from `Debug`, zeroized, and startup fails if
-   memory locking fails.
+   memory locking fails. Temporary stdin buffers owned by the client are also
+   zeroized on error, including partial input retained after a failed read.
+   The vendored `rtoolbox` patch used by `rpassword` clears the whole current
+   string allocation on drop, including characters removed by terminal editing.
+   This does not cover earlier allocations released during string growth.
 3. The app derives a `QubicWallet`, constructs the chosen backend and engine,
    and drops the seed wrapper.
 4. The engine creates exactly three slots for streams `0`, `1`, and `2`, all at
@@ -75,8 +83,9 @@ does not persist preimages and therefore waits until that exact slot disappears.
 
 ## Main loop
 
-The engine uses a 100 ms interval, skipping missed wakeups instead of accumulating
-catch-up cycles:
+The application selects a 20 ms polling interval for gRPC's local tick cache
+and 100 ms for RPC and Bob. It passes the interval to the transport-neutral
+engine, which skips missed wakeups instead of accumulating catch-up cycles:
 
 1. Fetch fresh tick metadata with a two-second timeout. Failure aborts only this
    cycle and is retried; an old tick is never substituted to schedule a send.
@@ -96,7 +105,8 @@ Status, transaction broadcasts, and the single delayed tick-data check are
 separate bounded Tokio tasks. A slow or failed request does not serialize the
 other streams. The engine aborts its status, broadcast, and tick-data tasks on
 reset and all owned tasks on drop. A cancellation-safe shutdown observer
-remains active while tick calls are awaited. Broadcast dispatch precedes new
+remains active while tick calls are awaited and is aborted when the run future
+is dropped, including external cancellation. Broadcast dispatch precedes new
 status and monitoring requests; faster tick polling does not increase the
 provider-status request limit.
 
@@ -108,17 +118,21 @@ provider-status request limit.
 - A fresh first target is the first matching stream tick at or after
   `current_tick + 6` and, after a restart, at least three ticks after the old
   signed tail. Its broadcast may overlap delivery of that old tail.
-- A planned transaction becomes broadcast-eligible at most six ticks before
-  its immutable target. If polling skips that boundary, it is still sent while
-  the target remains future.
+- Planning stays six ticks ahead. A first commit (zero reveal) becomes
+  broadcast-eligible six ticks before its immutable target. Normal and terminal
+  reveals become eligible only four ticks before their target, including retries
+  and retained old tails. The common dispatcher enforces this before passing
+  signed bytes to any backend. If polling skips the boundary, a call is still
+  sent while its target remains future.
 - One successful backend acceptance completes delivery of a planned call.
   A failed normal or pre-epoch-drain delivery retries identical signed bytes
   until its target. Reveal, commitment, tick, signature, and transaction ID
   are never regenerated or retargeted. Nothing is broadcast at or after the
   target.
 - While `Starting` or `Active`, an accepted first commit or normal call gets
-  one additional identical-byte broadcast when its target is four ticks away
-  (or three if polling skips that boundary). Core constructs target `T`'s
+  one additional identical-byte broadcast: first commits at four ticks before
+  target (or three if polling skips that boundary), normal reveals at three
+  ticks before target. Core constructs target `T`'s
   transaction set at `T - 2`; no additional attempt starts at or after that
   publication boundary. This best-effort dissemination attempt does
   not change acceptance, delivery counters, or monitoring deduplication; a
@@ -127,6 +141,9 @@ provider-status request limit.
   A prepared replacement follows the normal additional-broadcast policy.
   An outstanding attempt
   is cancelled at its target, chain removal, epoch reset, or process drop.
+  A normal reveal first accepted at `T - 4` waits until `T - 3` for its
+  additional attempt. Late first acceptance at `T - 3` can still be followed
+  by the one additional attempt during that tick; none starts at `T - 2`.
 - RPC acceptance requires both a non-empty transaction identifier and a
   positive `peersBroadcasted` count. A zero or invalid peer count is a
   temporary delivery failure and retains the identical-byte retry policy.
@@ -150,12 +167,21 @@ provider-status request limit.
 Procedure input is always 544 bytes: 512 reveal bytes followed by 32 commitment
 bytes. `GetProviderStatus` input is the raw 32-byte public key and output is the
 strict 680-byte aligned layout in `docs/Random.h`.
+Reported `(stream, tier)` pairs must be unique, matching the contract's enrollment
+rule. Any duplicate makes the entire status response malformed; no entry is
+chosen from a contradictory pair.
 
 The publication offset is traced to `TICK_TRANSACTIONS_PUBLICATION_OFFSET = 2`
 and `processTick()` in Core `src/qubic.cpp`, revision
 `f55b46126c99a1c3f3266164c744b3d0cd694d9c`. Arriving before execution alone does
 not establish inclusion; dissemination must reach the leader before selection.
 The primary identical-byte retry policy remains bounded by the immutable target.
+
+The commitment consumed by a reveal at `T` is submitted in the same stream at
+`T - 3`, whose transaction set is selected at `T - 5`. The four-tick reveal
+gate puts first disclosure after that selection under correct backend tick
+observations and the stated Core schedule. It is not a proof of consensus
+finality or protection against a malicious leader or false tick reports.
 
 Transport retries and the additional broadcast may present identical signed
 bytes more than once. If that
@@ -222,6 +248,26 @@ digest set, active arbitrator-authenticated computor key, K12 digest, and FourQ
 signature. Missing authentication state is an unavailable observation, not an
 empty tick.
 
+`GetTickTransactions` additionally returns all non-zero 32-byte transaction
+digests in Core slot order, with `digests_complete=true` only after successful
+authentication (including an empty set). The gRPC adapter rejects a different
+tick, inconsistent presence flags, malformed/zero/duplicate digests, or more
+than Core's 4096 slots. Legacy responses without the completeness marker retain
+the presence result but provide no inclusion evidence. RPC and Bob currently
+provide only their existing presence observations through this port.
+
+Before an attempted normal or terminal broadcast, the engine retains K12 of
+the complete immutable signed bytes for that target. During its existing
+delayed check it compares all 32 bytes against the complete digest set and logs
+`TickData inclusion for target T: included`, `missing`, or `unknown`. This is
+the binary transaction ID, independent of the backend's returned display ID.
+Digests are released after a successful check, window expiry, or epoch reset;
+errors retain them for the bounded retry window. Only the existing financial
+targets are checked; this does not add checks for first commits or successful
+terminal reveals. Inclusion observations do not change financial counters,
+restart decisions, or sending. The trusted local LightNode authenticates the
+leader's TickData, not consensus finality or successful contract execution.
+
 QubicLightNode maintains computor retrieval throughout each peer session. It
 rechecks the authenticated epoch at the reconnect interval and requests keys
 again when they do not match the observed epoch, with retries capped at 30
@@ -266,6 +312,10 @@ suspicion, and a response below the acknowledgement watermark is stale and
 cannot confirm a lag. For `Starting`, absence and foreign targets are ignored
 until the response was requested after the first target could execute.
 
+A repeated acknowledgement with no watermark advancement cannot clear a
+status suspicion if its request tick is at or below that suspicion's latest
+request tick. Actual acknowledgement advancement still clears the suspicion.
+
 The first two consistent observations are logged as non-terminal suspicions and
 normal planning continues. The third status absence, non-regressing foreign
 target, or unchanged acknowledgement lag freezes the current signed tail
@@ -296,6 +346,16 @@ with the completed chain.
 After a locally missed target, one absent response from a query requested after
 the discontinuity permits a fresh chain. The client never sends a speculative
 terminal reveal as failure recovery.
+
+In `Waiting` and `Restarting`, the minimum request tick for a fresh absence
+never decreases. An occupied response clears absence evidence, but an older
+request cannot lower the boundary established by a discontinuity or newer status.
+
+If a tick jump passes the next unplanned continuation, extension stops before
+constructing any backlog of expired transactions. Already planned expirations
+take precedence; otherwise the first unplanned missed reveal records one failure.
+The chain is discarded and restart still requires a fresh absence observation.
+This bounds signing work after an outage without skipping links in a live chain.
 
 ## Epoch lifecycle
 
@@ -342,9 +402,18 @@ Windows console shutdown events and Unix `SIGINT`, `SIGTERM`, `SIGQUIT`, and
 `SIGHUP` freeze normal planning. Each known chain keeps its already planned
 normal tail and appends a terminal reveal three ticks later.
 
+Once the shutdown observer completes, the engine also enters drain directly
+from local state, even if the tick request failed. Slots without a chain finish
+without network recovery. Preparing a terminal reveal does not send it: dispatch
+still requires fresh tick metadata and the existing four-tick disclosure gate.
+
+The cycle rechecks the shutdown token after awaiting tick metadata and harvesting
+completed tasks, immediately before choosing planning or drain. A signal during
+those waits cannot start or extend normal chains using a stale shutdown snapshot.
+
 Normal prerequisites retain identical-byte retry while their targets remain
 future. A terminal call waits until every prerequisite has backend acceptance
-and its target is within six ticks. Shutdown makes one terminal broadcast
+and its target is within four ticks. Shutdown makes one terminal broadcast
 attempt per managed stream, then exits after all streams finish. It does not
 wait for subsequent contract status.
 
@@ -366,21 +435,85 @@ the retained old calls.
 Every backend implements only four operations:
 
 - obtain epoch/current/initial tick and normalized tick duration;
-- report whether one historical tick contains data or transactions;
+- report whether one historical tick contains data or transactions, with an
+  optional complete authenticated transaction-digest set for inclusion checks;
 - query a contract function with raw input/output bytes;
 - broadcast exact signed transaction bytes and return a non-empty transaction
   identifier.
 
 There is no balance operation or balance-gated enrollment in this client.
 
+Read-operation failures identify the backend and operation without including
+transport error text, server error strings, or raw response bodies. gRPC status
+codes and numeric JSON-RPC error codes may be reported. This prevents remote
+responses and transport URLs from echoing credentials into runtime logs.
+
+Acceptance logs derive the short transaction ID locally from the K12 digest of
+the immutable signed bytes. Backend-returned identifiers are never logged,
+because even a successful response can echo sensitive request content. This
+does not change backend acceptance validation or the identical-byte retry policy.
+
+RPC and Bob successful HTTP bodies are limited to 16 MiB before JSON parsing.
+Both declared Content-Length and streamed chunks are checked; the exact limit
+is accepted. Oversized bodies are unavailable observations or failed broadcast
+attempts, never empty data or acceptance. HTTP error bodies are dropped without
+reading them. The limit bounds buffered wire input, not all JSON allocations.
+Existing engine timeouts and identical-byte retry rules still apply. The transport
+uses the existing reqwest 0.12 dependency and TLS implementation; the SCAPI revision
+and transaction construction/signing remain unchanged.
+
+Endpoint suffix normalization and operation-path construction modify only the
+part before the first query or fragment delimiter. Query parameters and their
+percent encoding are preserved, including trailing slashes in values. Fragments
+remain local URL metadata and are not transmitted by the HTTP client. Neither
+query parameters nor fragments are included in endpoint diagnostics.
+
 - RPC uses `/live/v1`, `/query/v1` for tick data, and base64 contract payloads.
+  A non-null tick-data response must identify the requested tick, including when
+  its transaction list is empty. A different tick is unavailable and retried;
+  it cannot change monitoring counters. A null tick-data result retains the
+  existing presence-only empty interpretation.
   Broadcast responses are accepted only when at least one peer was reached.
   A zero tick duration is normalized to 1,000 ms.
 - Bob uses JSON-RPC, tolerant result extraction, single-tick transfer queries,
-  monotonic query nonces, and hexadecimal contract payloads.
+  monotonic query nonces, and hexadecimal contract payloads. Decoded hex output
+  must contain complete ASCII hex-digit pairs; signs, whitespace, and Unicode
+  characters are rejected without echoing the response.
+  JSON-RPC responses with a `jsonrpc` member must echo the numeric request ID.
+  Legacy `result`/`error` envelopes with an explicit ID must also match it.
+  Raw legacy results and legacy envelopes without an ID retain their supported
+  interpretation; a raw transaction object's `id` alias is not an envelope ID.
+  ID matching detects mismatched responses, not dishonest server data.
+  A null `error` field is treated as absent; a non-null error takes precedence
+  over any result. Required result fields are still validated by each operation.
+  JSON-RPC errors expose only an integer error code when present; server-provided
+  messages and data are omitted because they may echo sensitive request content.
+  Transaction-ID aliases are checked in order for a string value; null or
+  non-string fields do not hide a later supported alias. Empty IDs remain errors.
+  Scheduling uses `currentVerifyLoggingTick`, not `lastSeenNetworkTick`.
+  Verification lag can delay delivery; a local Bob does not itself guarantee
+  timely inclusion or authenticate network progress.
 - gRPC uses the generated minimal QubicLightNode client, raw bytes, and
   `GetTickTransactions`. Missing initial tick and duration use the conservative
   epoch fallback and 1,000 ms.
+
+The gRPC adapter logs the target and full locally computed transaction digest
+before submission for offline inclusion checks. It never logs signed bytes or
+preimages.
+
+QubicLightNode offers each locally submitted transaction to six established
+peers by default. The user-approved `--broadcast-fanout` availability
+adaptation permits 1–32 direct recipients, limited by available connections.
+It preserves signed bytes, queue budgets, rate limits, and queue-acceptance
+semantics. A wider fanout increases traffic and does not prove inclusion.
+
+QubicLightNode also evaluates peer RTT and tick freshness in a separate bounded
+background task. It qualifies one spare connection before replacing an idle
+old peer, requires repeated evidence and a material RTT improvement or sustained
+poor observations, and applies cooldowns. A temporary candidate adds at most one
+socket beyond the working outbound target. Broadcasts never await selection;
+the client's T-4 gate, retries and signed bytes are unchanged. This approved
+availability policy is not authentication or a guarantee of timely inclusion.
 
 QubicLightNode verifies transaction signatures locally, but tick status comes
 from one structurally valid `BroadcastTick` or `RespondCurrentTickInfo` message
@@ -408,14 +541,24 @@ data, not cryptographic authentication or a Qubic consensus proof.
   appears as fresh status absence and follows the normal fresh-chain restart.
 - Seeds, preimages, signed bytes, credentials, query parameters, and fragments
   must never appear in logs, errors, `Debug`, or persisted runtime state.
+  CLI diagnostics omit raw seed and endpoint fields; RPC/Bob adapter diagnostics
+  omit their underlying transport clients, which can retain endpoint credentials.
+  `RevealAndCommitInput` diagnostics redact the complete input, including preimages.
 - Exactly one process may write a given identity/tier. A foreign target from a
   competing writer is detected in the selected backend's provider-status
   response. `GetProviderStatus` cannot distinguish two writers that target the
   same stream tick; that conflict is detected only after a later foreign update
   or disappearance. QubicLightNode obtains the contract output from one peer-
   trusted response.
-- Six-tick early broadcast exposes reveal material to the selected backend.
-  This is an explicit availability/confidentiality tradeoff.
+- Broadcast exposes reveal material to the backend and Core's P2P peers.
+  Reveal-bearing calls must not leave before observed `T - 4`. This closes the
+  client's previous `T - 6` disclosure window, but assumes the backend does not
+  report a tick ahead of the relevant network progress. All adapters remain
+  trusted for tick observations; switching transport is not a security fix.
+- Entropy is separate per collateral tier: the default 10,000 collateral is
+  tier 4 and does not contribute to tier 0. Operators must explicitly select
+  the tier they intend to support. The client cannot change on-chain fees or
+  guarantee unbiased entropy against selective withholding by other providers.
 
 The client cannot guarantee a reveal while the process, host, network, or
 backend is unavailable through the target tick. Collateral loss from such an

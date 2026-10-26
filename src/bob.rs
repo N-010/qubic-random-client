@@ -1,8 +1,11 @@
 use serde_json::Value;
 
 pub(crate) fn extract_result(value: Value) -> Result<Value, String> {
-    if let Some(error) = value.get("error") {
-        return Err(format!("bob rpc error: {}", error));
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        return Err(match error.get("code").and_then(Value::as_i64) {
+            Some(code) => format!("bob rpc error (code {code})"),
+            None => "bob rpc error".to_string(),
+        });
     }
     if let Some(result) = value.get("result") {
         return Ok(result.clone());
@@ -32,6 +35,74 @@ pub(crate) fn extract_string_field(value: &Value, keys: &[&str]) -> Option<Strin
         return None;
     };
     keys.iter()
-        .find_map(|key| map.get(*key))
-        .and_then(|value| value.as_str().map(str::to_string))
+        .find_map(|key| map.get(*key).and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rpc_errors_expose_only_numeric_codes() {
+        for error in [
+            json!({"code": -32000, "message": "credential=example-secret", "data": "echoed request"}),
+            json!({"code": "example-secret", "message": "echoed request"}),
+            json!("credential=example-secret"),
+        ] {
+            let expected = if error.get("code").and_then(Value::as_i64).is_some() {
+                "bob rpc error (code -32000)"
+            } else {
+                "bob rpc error"
+            };
+            assert_eq!(
+                extract_result(json!({"error": error})),
+                Err(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_id_aliases_skip_non_string_fields() {
+        let keys = ["transactionId", "txId", "hash", "id"];
+        assert_eq!(
+            extract_string_field(
+                &json!({"transactionId": null, "txId": 7, "hash": "accepted"}),
+                &keys
+            ),
+            Some("accepted".to_string()),
+        );
+        assert_eq!(
+            extract_string_field(
+                &json!({"transactionId": "preferred", "hash": "other"}),
+                &keys
+            ),
+            Some("preferred".to_string()),
+        );
+        assert_eq!(
+            extract_string_field(&json!({"transactionId": null, "id": 7}), &keys),
+            None
+        );
+    }
+
+    #[test]
+    fn null_error_does_not_hide_a_successful_result() {
+        let result = json!({"currentVerifyLoggingTick": 123});
+        assert_eq!(
+            extract_result(json!({"result": result.clone(), "error": null})),
+            Ok(result),
+        );
+    }
+
+    #[test]
+    fn non_null_error_takes_precedence_over_result() {
+        assert!(
+            extract_result(json!({
+                "result": {"transfers": []},
+                "error": {"code": -32000, "message": "unavailable"},
+            }))
+            .is_err()
+        );
+    }
 }

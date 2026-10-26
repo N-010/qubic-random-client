@@ -9,9 +9,13 @@ use scapi::{QubicId, QubicWallet, build_ticket_tx_bytes};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::AppResult;
-use crate::backend::{BackendError, ContractFunctionRequest, NetworkBackend, TickInfo};
+use crate::backend::{
+    BackendError, ContractFunctionRequest, NetworkBackend, TickInfo, TickTransactions,
+    transaction_digest,
+};
 use crate::console;
 use crate::contract::{
     GET_PROVIDER_STATUS_FUNCTION, ProviderStatus, RANDOM_CONTRACT_INDEX,
@@ -21,6 +25,7 @@ use crate::entropy::{commit_digest, fill_secure_bits};
 
 const STREAM_COUNT: u32 = 3;
 const SEND_LEAD_TICKS: u32 = 6;
+const REVEAL_SEND_LEAD_TICKS: u32 = 4;
 const REDUNDANT_SEND_LEAD_TICKS: u32 = 4;
 const TICK_DATA_PUBLICATION_LEAD_TICKS: u32 = 2;
 const STATUS_CONFIRMATIONS_REQUIRED: u8 = 3;
@@ -228,7 +233,7 @@ struct StatusObservation {
 struct PendingTickCheck {
     target_tick: u32,
     failures: u32,
-    task: NetworkTask<bool>,
+    task: NetworkTask<TickTransactions>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +290,7 @@ pub struct ProviderEngine {
     ready_tick_checks: BTreeMap<(Instant, u32), u32>,
     queued_target_ticks: BTreeSet<u32>,
     checked_target_ticks: BTreeSet<u32>,
+    target_digests: BTreeMap<u32, [u8; 32]>,
     tick_check: Option<PendingTickCheck>,
     next_tick_check_at: Instant,
     oldest_tick_check: u32,
@@ -332,6 +338,7 @@ impl ProviderEngine {
             ready_tick_checks: BTreeMap::new(),
             queued_target_ticks: BTreeSet::new(),
             checked_target_ticks: BTreeSet::new(),
+            target_digests: BTreeMap::new(),
             tick_check: None,
             next_tick_check_at: Instant::now(),
             oldest_tick_check: 0,
@@ -381,18 +388,19 @@ impl ProviderEngine {
     pub async fn run(
         mut self,
         shutdown: impl Future<Output = AppResult<()>> + Send + 'static,
+        poll_interval: Duration,
     ) -> AppResult<()> {
         let cancellation = CancellationToken::new();
         let observer_token = cancellation.clone();
-        let mut shutdown_task = Some(tokio::spawn(async move {
+        let mut shutdown_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             let result = shutdown.await;
             let requested_at = Instant::now();
             observer_token.cancel();
             (result, requested_at)
-        }));
+        })));
         let mut shutting_down = false;
         let mut shutdown_deadline = None;
-        let mut poll = interval(POLL_INTERVAL);
+        let mut poll = interval(poll_interval);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -408,14 +416,13 @@ impl ProviderEngine {
             }
 
             poll.tick().await;
-            if let Err(err) = self
-                .cycle(shutting_down || cancellation.is_cancelled())
-                .await
-            {
+            if let Err(err) = self.cycle(&cancellation).await {
                 console::log_warn(format!("Provider cycle failed: {err}"));
             }
 
-            let observer_finished = shutdown_task.as_ref().is_some_and(JoinHandle::is_finished);
+            let observer_finished = shutdown_task
+                .as_ref()
+                .is_some_and(AbortOnDropHandle::is_finished);
             if !shutting_down && observer_finished {
                 let observer = shutdown_task
                     .take()
@@ -427,11 +434,14 @@ impl ProviderEngine {
                 shutting_down = true;
                 shutdown_deadline = Some(requested_at + SHUTDOWN_TIMEOUT);
                 console::log_info("Shutdown requested; normal planning is frozen");
+                for index in 0..self.slots.len() {
+                    self.enter_drain(index, DrainReason::Shutdown)?;
+                }
             }
         }
     }
 
-    async fn cycle(&mut self, shutting_down: bool) -> AppResult<()> {
+    async fn cycle(&mut self, cancellation: &CancellationToken) -> AppResult<()> {
         let tick = self
             .backend_call("get tick info", self.backend.tick_info())
             .await?;
@@ -449,6 +459,7 @@ impl ProviderEngine {
             }
         }
 
+        let shutting_down = cancellation.is_cancelled();
         let epoch_draining = matches!(
             self.epoch_phase,
             Some(EpochPhase::Draining { epoch }) if epoch == tick.epoch
@@ -537,6 +548,7 @@ impl ProviderEngine {
             check.task.abort();
         }
         self.pending_tick_checks.clear();
+        self.target_digests.clear();
         self.ready_tick_checks.clear();
         self.queued_target_ticks.clear();
         self.checked_target_ticks.clear();
@@ -630,7 +642,8 @@ impl ProviderEngine {
                 None => {}
                 Some(_) => {
                     self.slots[index].state = SlotState::Waiting {
-                        absence_after_tick: observation.requested_tick.saturating_add(1),
+                        absence_after_tick: absence_after_tick
+                            .max(observation.requested_tick.saturating_add(1)),
                         absence_observed: false,
                     };
                 }
@@ -690,7 +703,8 @@ impl ProviderEngine {
                 Some(_) => {
                     self.slots[index].state = SlotState::Restarting {
                         frozen_tail,
-                        absence_after_tick: observation.requested_tick.saturating_add(1),
+                        absence_after_tick: absence_after_tick
+                            .max(observation.requested_tick.saturating_add(1)),
                         absence_observed: false,
                         drain_reason,
                     };
@@ -718,6 +732,13 @@ impl ProviderEngine {
             }
 
             let advanced = chain.confirmed_through != Some(confirmed_tick);
+            if !advanced
+                && chain.status_suspicion.is_some_and(|current| {
+                    observation.requested_tick <= current.last_requested_tick
+                })
+            {
+                return;
+            }
             if advanced {
                 chain.confirmed_through = Some(confirmed_tick);
                 chain.status_suspicion = None;
@@ -951,6 +972,30 @@ impl ProviderEngine {
         ) {
             return Ok(());
         }
+        let missed_target = self.slots[index].chain.as_ref().and_then(|chain| {
+            chain
+                .last_target
+                .checked_add(STREAM_COUNT)
+                .filter(|target| *target <= current_tick)
+        });
+        if let Some(missed_target) = missed_target {
+            // Resolve already planned failures first, then an unplanned gap.
+            // Never sign a backlog of calls whose targets have already passed.
+            self.expire_calls(index, current_tick);
+            if matches!(
+                self.slots[index].state,
+                SlotState::Starting { .. } | SlotState::Active
+            ) {
+                self.mark_financial_failure(missed_target);
+                self.lose_chain(
+                    index,
+                    current_tick.saturating_add(1),
+                    false,
+                    "a required target tick passed before its continuation was planned",
+                );
+            }
+            return Ok(());
+        }
         let horizon = current_tick
             .checked_add(SEND_LEAD_TICKS)
             .ok_or("planning horizon overflowed")?;
@@ -1120,7 +1165,6 @@ impl ProviderEngine {
     }
 
     fn dispatch_calls(&mut self, index: usize, current_tick: u32, tick_duration_ms: u32) {
-        let horizon = current_tick.saturating_add(SEND_LEAD_TICKS);
         let redundant_allowed = matches!(
             self.slots[index].state,
             SlotState::Starting { .. } | SlotState::Active
@@ -1149,6 +1193,13 @@ impl ProviderEngine {
         };
 
         for call in &mut chain.calls {
+            // The previous round's commit set is selected at T-5. Never
+            // expose its preimage to the backend or P2P gossip before T-4.
+            let lead = match call.kind {
+                CallKind::FirstCommit => SEND_LEAD_TICKS,
+                CallKind::RevealAndCommit | CallKind::TerminalReveal => REVEAL_SEND_LEAD_TICKS,
+            };
+            let horizon = current_tick.saturating_add(lead);
             if current_tick >= call.target_tick || call.target_tick > horizon {
                 continue;
             }
@@ -1161,7 +1212,12 @@ impl ProviderEngine {
                 && call.kind != CallKind::TerminalReveal
                 && !call.redundant_attempted
                 && call.target_tick - current_tick > TICK_DATA_PUBLICATION_LEAD_TICKS
-                && call.target_tick - current_tick <= REDUNDANT_SEND_LEAD_TICKS;
+                && call.target_tick - current_tick
+                    <= match call.kind {
+                        CallKind::FirstCommit => REDUNDANT_SEND_LEAD_TICKS,
+                        CallKind::RevealAndCommit => 3,
+                        CallKind::TerminalReveal => 0,
+                    };
             if !redundant && !matches!(call.state, BroadcastState::Ready | BroadcastState::Retry) {
                 continue;
             }
@@ -1175,6 +1231,11 @@ impl ProviderEngine {
             }
 
             let backend = Arc::clone(&self.backend);
+            if call.kind != CallKind::FirstCommit {
+                self.target_digests
+                    .entry(call.target_tick)
+                    .or_insert_with(|| transaction_digest(&call.tx_bytes));
+            }
             let tx_bytes = call.tx_bytes.clone();
             let attempt_timeout =
                 broadcast_attempt_timeout(call.target_tick - current_tick, tick_duration_ms);
@@ -1242,14 +1303,16 @@ impl ProviderEngine {
                 continue;
             }
             match join_network_task(task).await {
-                Ok(tx_id) => {
+                Ok(_) => {
                     call.state = BroadcastState::Accepted;
                     if call.kind == CallKind::RevealAndCommit {
                         accepted_normal_targets.push(call.target_tick);
                     }
                     console::log_info(format!(
                         "Backend accepted transaction {} for stream {} tick {}",
-                        console::shorten_id(&tx_id),
+                        console::shorten_id(
+                            &QubicId(transaction_digest(&call.tx_bytes)).get_identity()
+                        ),
                         key.stream,
                         call.target_tick
                     ));
@@ -1289,19 +1352,26 @@ impl ProviderEngine {
             return;
         };
         match join_network_task(check.task).await {
-            Ok(true) => {
+            Ok(observation) => {
                 self.queued_target_ticks.remove(&check.target_tick);
                 self.checked_target_ticks.insert(check.target_tick);
+                let inclusion = self
+                    .target_digests
+                    .remove(&check.target_tick)
+                    .and_then(|digest| observation.contains(&digest));
                 console::log_info(format!(
-                    "Target tick {} contains transactions",
-                    check.target_tick
+                    "TickData inclusion for target {}: {}",
+                    check.target_tick,
+                    match inclusion {
+                        Some(true) => "included",
+                        Some(false) => "missing",
+                        None => "unknown (complete digests or local transaction unavailable)",
+                    },
                 ));
-            }
-            Ok(false) => {
-                self.queued_target_ticks.remove(&check.target_tick);
-                self.checked_target_ticks.insert(check.target_tick);
-                self.record_send_outcome(check.target_tick, SendOutcome::Empty);
-                console::log_warn(format!("Target tick {} is empty", check.target_tick));
+                if !observation.has_transactions {
+                    self.record_send_outcome(check.target_tick, SendOutcome::Empty);
+                    console::log_warn(format!("Target tick {} is empty", check.target_tick));
+                }
             }
             Err(err) => {
                 let retry_delay = Duration::from_secs((1u64 << check.failures.min(5)).min(30));
@@ -1372,6 +1442,7 @@ impl ProviderEngine {
             .retain(|(_, tick), _| *tick >= oldest);
         self.queued_target_ticks.retain(|tick| *tick >= oldest);
         self.checked_target_ticks.retain(|tick| *tick >= oldest);
+        self.target_digests.retain(|tick, _| *tick >= oldest);
         if self
             .tick_check
             .as_ref()
@@ -1660,6 +1731,37 @@ mod tests {
     use super::*;
     use crate::contract::ProviderSlot;
 
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_without_chains_does_not_require_a_working_backend() {
+        let backend = Arc::new(MockBackend::default());
+        let engine = engine(Arc::clone(&backend));
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            engine.run(async { Ok(()) }, Duration::from_millis(20)),
+        )
+        .await;
+        assert!(
+            result
+                .expect("empty shutdown must not wait for network recovery")
+                .is_ok()
+        );
+        assert!(backend.broadcasts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_with_a_chain_still_requires_fresh_ticks() {
+        let backend = Arc::new(MockBackend::default());
+        let mut engine = engine(Arc::clone(&backend));
+        observe_absence(&mut engine, 1, 99);
+        engine.start_if_ready(1, 100).expect("start chain");
+        let result = engine.run(async { Ok(()) }, Duration::from_secs(1)).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "shutdown timed out before final reveals could be submitted"
+        );
+        assert!(backend.broadcasts.lock().unwrap().is_empty());
+    }
+
     #[derive(Default)]
     struct MockBackend {
         broadcasts: Mutex<Vec<Vec<u8>>>,
@@ -1668,19 +1770,36 @@ mod tests {
         tick_results: Mutex<VecDeque<Result<bool, BackendError>>>,
     }
 
+    #[tokio::test]
+    async fn maximum_monitoring_interval_does_not_panic() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        engine.empty_tick_check_interval = Duration::from_millis(u64::MAX);
+        engine.queue_tick_check(100);
+        engine.ensure_tick_check(110);
+        assert_eq!(engine.tick_check.as_ref().unwrap().target_tick, 100);
+        engine.tick_check.take().unwrap().task.abort();
+        engine.queue_tick_check(101);
+        engine.ensure_tick_check(111);
+        assert!(engine.tick_check.is_none());
+    }
+
     #[async_trait]
     impl NetworkBackend for MockBackend {
         async fn tick_info(&self) -> Result<TickInfo, BackendError> {
             Err(BackendError::new("not used"))
         }
 
-        async fn tick_has_transactions(&self, _tick: u32) -> Result<bool, BackendError> {
+        async fn tick_has_transactions(
+            &self,
+            _tick: u32,
+        ) -> Result<TickTransactions, BackendError> {
             self.tick_checks.fetch_add(1, Ordering::Relaxed);
             self.tick_results
                 .lock()
                 .expect("tick results lock")
                 .pop_front()
                 .unwrap_or(Ok(true))
+                .map(Into::into)
         }
 
         async fn query_contract_function(
@@ -1738,11 +1857,143 @@ mod tests {
         first_target + STREAM_COUNT
     }
 
+    #[test]
+    fn acceptance_log_uses_local_id_instead_of_backend_text() {
+        const CHILD: &str = "RANDOM_CLIENT_ACCEPTANCE_LOG_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let mut engine = engine(Arc::new(MockBackend::default()));
+                    let target = prepare_normal_call(&mut engine, 0);
+                    let call = engine.slots[0]
+                        .chain
+                        .as_mut()
+                        .unwrap()
+                        .calls
+                        .back_mut()
+                        .unwrap();
+                    let local_id = QubicId(transaction_digest(&call.tx_bytes)).get_identity();
+                    println!("EXPECTED_LOCAL_ID={}", console::shorten_id(&local_id));
+                    call.state = BroadcastState::Broadcasting;
+                    call.broadcast = Some(tokio::spawn(async {
+                        Ok("SECRET synthetic echoed request".into())
+                    }));
+                    harvest_until_idle(&mut engine, 0).await;
+                    assert_eq!(
+                        engine.slots[0]
+                            .chain
+                            .as_ref()
+                            .unwrap()
+                            .calls
+                            .back()
+                            .unwrap()
+                            .state,
+                        BroadcastState::Accepted
+                    );
+                    assert_eq!(engine.send_outcomes.get(&target), Some(&SendOutcome::Ok));
+                });
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine::tests::acceptance_log_uses_local_id_instead_of_backend_text",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "child failed: {output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(!stdout.contains("SECRET"), "backend text leaked into log");
+        let expected = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("EXPECTED_LOCAL_ID="))
+            .unwrap();
+        assert!(stdout.contains(&format!(
+            "Backend accepted transaction {expected} for stream 0 tick"
+        )));
+    }
+
     fn empty_status(requested_tick: u32) -> StatusObservation {
         StatusObservation {
             epoch: 1,
             requested_tick,
             status: ProviderStatus { slots: Vec::new() },
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_backend_status_cannot_authorize_enrollment() {
+        struct StatusBackend(Vec<u8>);
+
+        #[async_trait]
+        impl NetworkBackend for StatusBackend {
+            async fn tick_info(&self) -> Result<TickInfo, BackendError> {
+                panic!("status check must not fetch tick metadata")
+            }
+
+            async fn tick_has_transactions(
+                &self,
+                _: u32,
+            ) -> Result<TickTransactions, BackendError> {
+                panic!("status check must not query TickData")
+            }
+
+            async fn query_contract_function(
+                &self,
+                request: ContractFunctionRequest,
+            ) -> Result<Vec<u8>, BackendError> {
+                assert_eq!(request.contract_index, RANDOM_CONTRACT_INDEX);
+                assert_eq!(request.input_type, GET_PROVIDER_STATUS_FUNCTION);
+                assert_eq!(request.input.len(), 32);
+                Ok(self.0.clone())
+            }
+
+            async fn broadcast_transaction(&self, _: Vec<u8>) -> Result<String, BackendError> {
+                panic!("status check must not send transactions")
+            }
+        }
+
+        let mut malformed = vec![vec![], vec![0; 679], vec![0; 681]];
+        for (offset, value) in [(0, 33u32), (4, 3), (132, 10), (520, 2)] {
+            let mut bytes = vec![0; 680];
+            bytes[..4].copy_from_slice(&1u32.to_le_bytes());
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            malformed.push(bytes);
+        }
+        let mut duplicate = vec![0; 680];
+        duplicate[..4].copy_from_slice(&2u32.to_le_bytes());
+        malformed.push(duplicate);
+
+        for (bytes, valid_absence) in malformed
+            .into_iter()
+            .map(|bytes| (bytes, false))
+            .chain(std::iter::once((vec![0; 680], true)))
+        {
+            let mut engine = engine(Arc::new(MockBackend::default()));
+            engine.backend = Arc::new(StatusBackend(bytes));
+            engine.ensure_status_query(1, 100);
+            timeout(Duration::from_secs(1), async {
+                while !engine.status_query.as_ref().unwrap().task.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let observation = engine.harvest_status_query().await;
+            assert_eq!(observation.is_some(), valid_absence);
+            for index in 0..3 {
+                if let Some(observation) = &observation {
+                    engine.apply_status(index, observation);
+                }
+                engine.start_if_ready(index, 100).unwrap();
+                assert_eq!(engine.slots[index].chain.is_some(), valid_absence);
+            }
+            assert!(engine.status_query.is_none());
         }
     }
 
@@ -2115,7 +2366,7 @@ mod tests {
             let expected = vec![terminal.tx_bytes.clone()];
             let stats = engine.send_stats;
             engine.expire_calls(1, old_tail);
-            engine.dispatch_calls(1, old_tail, 1_000);
+            engine.dispatch_calls(1, old_tail + 2, 1_000);
             harvest_until_idle(&mut engine, 1).await;
             engine.finish_drain(1);
             assert_eq!(
@@ -2180,6 +2431,61 @@ mod tests {
             engine.slots[2].state,
             SlotState::Drained(DrainOutcome::NothingToDrain)
         );
+    }
+
+    #[tokio::test]
+    async fn epoch_reset_discards_completed_unharvested_results() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let (_, tail) = prepare_active_tail(&mut engine, 0);
+        engine.record_send_outcome(tail, SendOutcome::Ok);
+        let previous_stats = engine.send_stats;
+        engine.status_query = Some(PendingStatusQuery {
+            epoch: 1,
+            requested_tick: tail,
+            task: tokio::spawn(async move { Ok(empty_status(tail).status) }),
+        });
+        engine.tick_check = Some(PendingTickCheck {
+            target_tick: tail,
+            failures: 0,
+            task: tokio::spawn(async { Ok(false.into()) }),
+        });
+        let call = engine.slots[0]
+            .chain
+            .as_mut()
+            .unwrap()
+            .calls
+            .back_mut()
+            .unwrap();
+        call.state = BroadcastState::Broadcasting;
+        call.broadcast = Some(tokio::spawn(async { Ok("accepted".to_string()) }));
+        tokio::task::yield_now().await;
+        assert!(engine.status_query.as_ref().unwrap().task.is_finished());
+        assert!(engine.tick_check.as_ref().unwrap().task.is_finished());
+        assert!(
+            engine.slots[0]
+                .chain
+                .as_ref()
+                .unwrap()
+                .calls
+                .back()
+                .unwrap()
+                .broadcast
+                .as_ref()
+                .unwrap()
+                .is_finished()
+        );
+
+        engine.reset_slots();
+        assert!(engine.harvest_status_query().await.is_none());
+        engine.harvest_tick_check().await;
+        for index in 0..3 {
+            engine.harvest_broadcasts(index).await;
+            engine.start_if_ready(index, tail + 10).unwrap();
+            assert!(engine.slots[index].chain.is_none());
+        }
+        assert_eq!(engine.send_stats, previous_stats);
+        assert!(engine.send_outcomes.is_empty());
+        assert!(engine.checked_target_ticks.is_empty());
     }
 
     #[tokio::test]
@@ -2378,6 +2684,29 @@ mod tests {
         assert_eq!(chain.status_suspicion, None);
     }
 
+    #[test]
+    fn stale_unchanged_confirmation_cannot_erase_newer_suspicion() {
+        for index in 0..3 {
+            let mut engine = engine(Arc::new(MockBackend::default()));
+            let (first, _) = prepare_active_tail(&mut engine, index);
+            for requested_tick in [first + 4, first + 5] {
+                engine.apply_status(index, &empty_status(requested_tick));
+            }
+            let suspicion = engine.slots[index].chain.as_ref().unwrap().status_suspicion;
+            let stale = owned_status(&engine, index, first + 1, first);
+            engine.apply_status(index, &stale);
+            assert_eq!(
+                engine.slots[index].chain.as_ref().unwrap().status_suspicion,
+                suspicion
+            );
+            engine.apply_status(index, &empty_status(first + 6));
+            assert!(matches!(
+                engine.slots[index].state,
+                SlotState::Restarting { .. }
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn frozen_status_tail_is_sent_before_fresh_first_commit() {
         let backend = Arc::new(MockBackend::default());
@@ -2518,6 +2847,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backend_recovery_at_target_cannot_restart_an_expired_retry() {
+        for index in 0..3 {
+            let backend = Arc::new(MockBackend::default());
+            backend.failures_left.store(4, Ordering::Relaxed);
+            let mut engine = engine(Arc::clone(&backend));
+            let target = prepare_normal_call(&mut engine, index);
+            let signed = engine.slots[index]
+                .chain
+                .as_ref()
+                .unwrap()
+                .calls
+                .back()
+                .unwrap()
+                .tx_bytes
+                .clone();
+
+            for tick in target - REVEAL_SEND_LEAD_TICKS..target {
+                engine.dispatch_calls(index, tick, 1_000);
+                harvest_until_idle(&mut engine, index).await;
+            }
+            // The backend now succeeds, but the immutable target has arrived.
+            // Check the dispatch guard independently of the expiry pass.
+            engine.dispatch_calls(index, target, 1_000);
+            harvest_until_idle(&mut engine, index).await;
+            engine.expire_calls(index, target);
+            engine.dispatch_calls(index, target + 1, 1_000);
+            harvest_until_idle(&mut engine, index).await;
+
+            assert_eq!(*backend.broadcasts.lock().unwrap(), vec![signed; 4]);
+            assert_eq!(
+                engine.send_stats,
+                SendStats {
+                    ok: 0,
+                    failed: 1,
+                    empty: 0,
+                }
+            );
+            assert!(engine.slots[index].chain.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn retry_reuses_identical_signed_bytes() {
         let backend = Arc::new(MockBackend::default());
         backend.failures_left.store(1, Ordering::Relaxed);
@@ -2536,17 +2907,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reveals_wait_for_commit_selection_in_every_lifecycle() {
+        for index in 0..3 {
+            for lifecycle in 0..5 {
+                for initial_state in [BroadcastState::Ready, BroadcastState::Retry] {
+                    for first_lead in [4, 3] {
+                        let backend = Arc::new(MockBackend::default());
+                        let mut engine = engine(Arc::clone(&backend));
+                        let mut target = prepare_normal_call(&mut engine, index);
+                        match lifecycle {
+                            0 => {}
+                            1 => engine.slots[index].state = SlotState::Active,
+                            2 => {
+                                engine.slots[index].state = SlotState::Restarting {
+                                    frozen_tail: target,
+                                    absence_after_tick: target + 1,
+                                    absence_observed: false,
+                                    drain_reason: None,
+                                };
+                            }
+                            3 | 4 => {
+                                engine.slots[index]
+                                    .chain
+                                    .as_mut()
+                                    .unwrap()
+                                    .calls
+                                    .back_mut()
+                                    .unwrap()
+                                    .state = BroadcastState::Accepted;
+                                let reason = if lifecycle == 3 {
+                                    DrainReason::Epoch
+                                } else {
+                                    DrainReason::Shutdown
+                                };
+                                engine.enter_drain(index, reason).unwrap();
+                                target += STREAM_COUNT;
+                            }
+                            _ => unreachable!(),
+                        }
+                        let call = engine.slots[index]
+                            .chain
+                            .as_mut()
+                            .unwrap()
+                            .calls
+                            .back_mut()
+                            .unwrap();
+                        call.state = initial_state;
+                        let signed = call.tx_bytes.clone();
+                        for now in target - 6..=target - 5 {
+                            engine.dispatch_calls(index, now, 1_000);
+                            harvest_until_idle(&mut engine, index).await;
+                            assert!(
+                                backend.broadcasts.lock().unwrap().is_empty(),
+                                "early reveal: lifecycle {lifecycle}, tick {now}"
+                            );
+                        }
+                        engine.dispatch_calls(index, target - first_lead, 1_000);
+                        harvest_until_idle(&mut engine, index).await;
+                        if lifecycle == 4 && initial_state == BroadcastState::Retry {
+                            assert!(backend.broadcasts.lock().unwrap().is_empty());
+                        } else {
+                            assert_eq!(*backend.broadcasts.lock().unwrap(), vec![signed]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_reveal_waits_while_replacement_commit_can_be_sent() {
+        let backend = Arc::new(MockBackend::default());
+        let mut engine = engine(Arc::clone(&backend));
+        let (first, tail) = prepare_active_tail(&mut engine, 1);
+        for call in &mut engine.slots[1].chain.as_mut().unwrap().calls {
+            if call.target_tick < tail {
+                call.state = BroadcastState::Accepted;
+            }
+        }
+        engine.begin_status_restart(1, tail - 6, true, "test restart");
+        engine.start_if_ready(1, tail - 6).unwrap();
+        let old_bytes = engine.slots[1]
+            .chain
+            .as_ref()
+            .unwrap()
+            .calls
+            .iter()
+            .find(|call| call.target_tick == tail)
+            .unwrap()
+            .tx_bytes
+            .clone();
+        assert!(engine.slots[1].chain.as_ref().unwrap().first_target > first);
+        for now in tail - 6..=tail - 5 {
+            engine.dispatch_calls(1, now, 1_000);
+            harvest_until_idle(&mut engine, 1).await;
+            assert!(backend.broadcasts.lock().unwrap().is_empty());
+        }
+        backend.failures_left.store(1, Ordering::Relaxed);
+        engine.dispatch_calls(1, tail - 4, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        engine.dispatch_calls(1, tail - 3, 1_000);
+        harvest_until_idle(&mut engine, 1).await;
+        let new_bytes = engine.slots[1]
+            .chain
+            .as_ref()
+            .unwrap()
+            .calls
+            .back()
+            .unwrap()
+            .tx_bytes
+            .clone();
+        assert_eq!(
+            *backend.broadcasts.lock().unwrap(),
+            vec![old_bytes.clone(), old_bytes, new_bytes]
+        );
+    }
+
+    #[tokio::test]
     async fn retry_counts_only_the_final_normal_delivery() {
         let backend = Arc::new(MockBackend::default());
         backend.failures_left.store(1, Ordering::Relaxed);
         let mut engine = engine(Arc::clone(&backend));
         let target = prepare_normal_call(&mut engine, 1);
 
-        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        engine.dispatch_calls(1, target - REVEAL_SEND_LEAD_TICKS, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         assert_eq!(engine.send_stats, SendStats::default());
 
-        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        engine.dispatch_calls(1, target - REVEAL_SEND_LEAD_TICKS, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         assert_eq!(
             engine.send_stats,
@@ -2575,13 +3063,115 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tick_jump_stops_chain_without_signing_missed_continuations() {
+        for jump in [3, 300, u32::MAX] {
+            for index in 0..3 {
+                for accepted_tail in [false, true] {
+                    let mut engine = engine(Arc::new(MockBackend::default()));
+                    let first_normal = prepare_normal_call(&mut engine, index);
+                    if accepted_tail {
+                        engine.slots[index]
+                            .chain
+                            .as_mut()
+                            .unwrap()
+                            .calls
+                            .back_mut()
+                            .unwrap()
+                            .state = BroadcastState::Accepted;
+                    }
+                    let missed = if accepted_tail {
+                        first_normal + 3
+                    } else {
+                        first_normal
+                    };
+                    let current = first_normal.saturating_add(jump);
+                    engine.extend_chain(index, current).unwrap();
+                    assert!(engine.slots[index].chain.is_none());
+                    assert_eq!(
+                        engine.slots[index].state,
+                        SlotState::Waiting {
+                            absence_after_tick: current.saturating_add(1),
+                            absence_observed: false,
+                        }
+                    );
+                    assert_eq!(
+                        engine.send_stats,
+                        SendStats {
+                            ok: 0,
+                            failed: 1,
+                            empty: 0
+                        }
+                    );
+                    assert_eq!(
+                        engine.send_outcomes.get(&missed),
+                        Some(&SendOutcome::Failed)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_occupied_status_cannot_relax_restart_freshness() {
+        for index in 0..3 {
+            let mut engine = engine(Arc::new(MockBackend::default()));
+            let target = prepare_normal_call(&mut engine, index);
+            let old_occupied = owned_status(&engine, index, target - 5, target - 3);
+            engine.expire_calls(index, target);
+            engine.apply_status(index, &old_occupied);
+            engine.apply_status(index, &empty_status(target));
+            engine.start_if_ready(index, target + 1).unwrap();
+            assert!(engine.slots[index].chain.is_none());
+            assert_eq!(
+                engine.slots[index].state,
+                SlotState::Waiting {
+                    absence_after_tick: target + 1,
+                    absence_observed: false,
+                }
+            );
+            engine.apply_status(index, &empty_status(target + 1));
+            engine.start_if_ready(index, target + 1).unwrap();
+            assert!(engine.slots[index].chain.is_some());
+        }
+    }
+
+    #[test]
+    fn delayed_occupied_status_cannot_relax_frozen_tail_freshness() {
+        for index in 0..3 {
+            let mut engine = engine(Arc::new(MockBackend::default()));
+            let (first, tail) = prepare_active_tail(&mut engine, index);
+            let old_occupied = owned_status(&engine, index, first - 1, first);
+            engine.begin_status_restart(index, tail + 1, false, "test discontinuity");
+            engine.apply_status(index, &old_occupied);
+            engine.apply_status(index, &empty_status(tail));
+            engine.start_if_ready(index, tail).unwrap();
+            assert_eq!(
+                engine.slots[index].state,
+                SlotState::Restarting {
+                    frozen_tail: tail,
+                    absence_after_tick: tail + 1,
+                    absence_observed: false,
+                    drain_reason: None,
+                }
+            );
+            assert_eq!(
+                engine.slots[index].chain.as_ref().unwrap().first_target,
+                first
+            );
+            engine.apply_status(index, &empty_status(tail + 1));
+            engine.start_if_ready(index, tail + 1).unwrap();
+            assert!(engine.slots[index].chain.as_ref().unwrap().first_target > tail);
+        }
+    }
+
     #[tokio::test]
     async fn accepted_normal_is_repeated_once_without_changing_its_outcome() {
         for repeat_fails in [false, true] {
             let backend = Arc::new(MockBackend::default());
             let mut engine = engine(Arc::clone(&backend));
             let target = prepare_normal_call(&mut engine, 1);
-            engine.dispatch_calls(1, target - 6, 1_000);
+            engine.dispatch_calls(1, target - 4, 1_000);
             harvest_until_idle(&mut engine, 1).await;
             let stats = engine.send_stats;
             assert_eq!(
@@ -2596,6 +3186,9 @@ mod tests {
                 .failures_left
                 .store(usize::from(repeat_fails), Ordering::Relaxed);
             engine.dispatch_calls(1, target - 5, 1_000);
+            assert_eq!(backend.broadcasts.lock().unwrap().len(), 1);
+            engine.dispatch_calls(1, target - 4, 1_000);
+            harvest_until_idle(&mut engine, 1).await;
             assert_eq!(backend.broadcasts.lock().unwrap().len(), 1);
             for now in target - 4..=target + 1 {
                 engine.dispatch_calls(1, now, 1_000);
@@ -2643,7 +3236,7 @@ mod tests {
             let backend = Arc::new(MockBackend::default());
             let mut engine = engine(Arc::clone(&backend));
             let target = prepare_normal_call(&mut engine, 1);
-            engine.dispatch_calls(1, target - 6, 1_000);
+            engine.dispatch_calls(1, target - 4, 1_000);
             harvest_until_idle(&mut engine, 1).await;
             engine.slots[1].state = state;
             engine.dispatch_calls(1, target - 3, 1_000);
@@ -2656,7 +3249,7 @@ mod tests {
     async fn redundant_task_is_cancelled_at_target_without_losing_acceptance() {
         let mut engine = engine(Arc::new(MockBackend::default()));
         let target = prepare_normal_call(&mut engine, 1);
-        engine.dispatch_calls(1, target - 6, 1_000);
+        engine.dispatch_calls(1, target - 4, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         let task = tokio::spawn(std::future::pending());
         let abort = task.abort_handle();
@@ -2696,7 +3289,7 @@ mod tests {
         let backend = Arc::new(MockBackend::default());
         let mut engine = engine(Arc::clone(&backend));
         let target = prepare_normal_call(&mut engine, 1);
-        engine.dispatch_calls(1, target - 6, 1_000);
+        engine.dispatch_calls(1, target - 4, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         for now in target - 2..=target + 1 {
             engine.dispatch_calls(1, now, 1_000);
@@ -2744,7 +3337,7 @@ mod tests {
         let backend = Arc::new(MockBackend::default());
         let mut engine = engine(Arc::clone(&backend));
         let (first_target, _) = prepare_active_tail(&mut engine, 0);
-        engine.dispatch_calls(0, first_target, 1_000);
+        engine.dispatch_calls(0, first_target + 2, 1_000);
         harvest_until_idle(&mut engine, 0).await;
         assert_eq!(engine.send_stats.ok, 2);
 
@@ -2825,6 +3418,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inclusion_monitoring_retains_local_hash_and_preserves_financial_outcome() {
+        for digests in [None, Some(vec![[8; 32]]), Some(vec![])] {
+            let backend = Arc::new(MockBackend::default());
+            let mut engine = engine(Arc::clone(&backend));
+            let target = prepare_normal_call(&mut engine, 1);
+            let signed = engine.slots[1]
+                .chain
+                .as_ref()
+                .unwrap()
+                .calls
+                .iter()
+                .find(|call| call.target_tick == target)
+                .unwrap()
+                .tx_bytes
+                .clone();
+            engine.dispatch_calls(1, target - REVEAL_SEND_LEAD_TICKS, 1_000);
+            harvest_until_idle(&mut engine, 1).await;
+            assert_eq!(
+                engine.target_digests.get(&target),
+                Some(&transaction_digest(&signed))
+            );
+            let before = engine.send_stats;
+            let observation = TickTransactions {
+                has_transactions: true,
+                transaction_digests: digests.map(|values| {
+                    if values.is_empty() {
+                        vec![transaction_digest(&signed)]
+                    } else {
+                        values
+                    }
+                }),
+            };
+            engine.tick_check = Some(PendingTickCheck {
+                target_tick: target,
+                failures: 0,
+                task: tokio::spawn(async move { Ok(observation) }),
+            });
+            harvest_tick_check_until_idle(&mut engine).await;
+            assert_eq!(engine.send_stats, before);
+            assert!(!engine.target_digests.contains_key(&target));
+            assert!(engine.checked_target_ticks.contains(&target));
+        }
+    }
+
+    #[test]
+    fn monitoring_digests_expire_and_reset_with_the_check_window() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        engine
+            .target_digests
+            .extend([(100, [1; 32]), (101, [2; 32])]);
+        engine.expire_tick_checks(101 + engine.reveal_check_delay_ticks + TICK_CHECK_WINDOW);
+        assert_eq!(engine.target_digests, BTreeMap::from([(101, [2; 32])]));
+        engine.reset_slots();
+        assert!(engine.target_digests.is_empty());
+    }
+
+    #[tokio::test]
     async fn empty_target_tick_reclassifies_normal_success() {
         let backend = Arc::new(MockBackend::default());
         backend
@@ -2835,7 +3485,7 @@ mod tests {
         let mut engine = engine(Arc::clone(&backend));
         let target = prepare_normal_call(&mut engine, 1);
 
-        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        engine.dispatch_calls(1, target - REVEAL_SEND_LEAD_TICKS, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         engine.ensure_tick_check(target + 1);
         harvest_tick_check_until_idle(&mut engine).await;
@@ -2881,7 +3531,7 @@ mod tests {
         let mut engine = engine(Arc::clone(&backend));
         let target = prepare_normal_call(&mut engine, 1);
 
-        engine.dispatch_calls(1, target - SEND_LEAD_TICKS, 1_000);
+        engine.dispatch_calls(1, target - REVEAL_SEND_LEAD_TICKS, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         engine.ensure_tick_check(target + 1);
         harvest_tick_check_until_idle(&mut engine).await;
@@ -3055,7 +3705,7 @@ mod tests {
             first.state = BroadcastState::Accepted;
         }
 
-        engine.dispatch_calls(1, 103, 1_000);
+        engine.dispatch_calls(1, 105, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         engine.finish_drain(1);
 
@@ -3078,7 +3728,7 @@ mod tests {
             .expect("enter drain");
         engine.slots[1].chain.as_mut().expect("chain").calls[0].state = BroadcastState::Accepted;
 
-        engine.dispatch_calls(1, 103, 1_000);
+        engine.dispatch_calls(1, 105, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         engine.finish_drain(1);
 
@@ -3109,7 +3759,7 @@ mod tests {
             .expect("terminal")
             .target_tick;
 
-        engine.dispatch_calls(1, terminal_target - SEND_LEAD_TICKS, 1_000);
+        engine.dispatch_calls(1, terminal_target - REVEAL_SEND_LEAD_TICKS, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         engine.expire_calls(1, terminal_target);
 
@@ -3161,9 +3811,9 @@ mod tests {
             first.state = BroadcastState::Accepted;
         }
 
-        engine.dispatch_calls(1, 103, 1_000);
+        engine.dispatch_calls(1, 105, 1_000);
         harvest_until_idle(&mut engine, 1).await;
-        engine.dispatch_calls(1, 103, 1_000);
+        engine.dispatch_calls(1, 105, 1_000);
         harvest_until_idle(&mut engine, 1).await;
         engine.finish_drain(1);
 
@@ -3280,6 +3930,74 @@ mod tests {
     }
 
     #[test]
+    fn epoch_stop_window_handles_calendar_and_interval_boundaries() {
+        for (year, month, day) in [(2025, 12, 31), (2026, 1, 7), (2024, 2, 28)] {
+            let noon = Utc.with_ymd_and_hms(year, month, day, 12, 0, 0).unwrap();
+            for (offset, expected) in [
+                (-601, false),
+                (-600, true),
+                (-1, true),
+                (0, true),
+                (1, false),
+            ] {
+                assert_eq!(
+                    is_epoch_stop_window(noon + TimeDelta::seconds(offset), 600),
+                    expected
+                );
+            }
+            assert!(!is_epoch_stop_window(noon - TimeDelta::seconds(1), 0));
+            assert!(is_epoch_stop_window(noon, 0));
+            assert!(!is_epoch_stop_window(noon + TimeDelta::seconds(1), 0));
+            for offset in [-604_799, -1, 0, 1, 604_799] {
+                assert!(is_epoch_stop_window(
+                    noon + TimeDelta::seconds(offset),
+                    u64::MAX
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn epoch_drain_stays_latched_until_new_epoch_then_warms_up() {
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        let noon = Utc.with_ymd_and_hms(2026, 8, 5, 12, 0, 0).unwrap();
+        let mut tick = TickInfo {
+            epoch: 9,
+            tick: 200,
+            initial_tick: 100,
+            tick_duration_ms: 1000,
+        };
+        engine.update_epoch_phase(&tick, noon - TimeDelta::seconds(601));
+        assert_eq!(engine.epoch_phase, Some(EpochPhase::Active { epoch: 9 }));
+        engine.update_epoch_phase(&tick, noon - TimeDelta::seconds(600));
+        assert_eq!(engine.epoch_phase, Some(EpochPhase::Draining { epoch: 9 }));
+        engine.update_epoch_phase(&tick, noon + TimeDelta::seconds(600));
+        assert_eq!(engine.epoch_phase, Some(EpochPhase::Draining { epoch: 9 }));
+        tick.epoch = 10;
+        tick.initial_tick = 200;
+        engine.update_epoch_phase(&tick, noon + TimeDelta::seconds(600));
+        assert_eq!(
+            engine.epoch_phase,
+            Some(EpochPhase::Warmup {
+                epoch: 10,
+                ready_tick: 250
+            })
+        );
+        tick.tick = 249;
+        engine.update_epoch_phase(&tick, noon + TimeDelta::seconds(601));
+        assert_eq!(
+            engine.epoch_phase,
+            Some(EpochPhase::Warmup {
+                epoch: 10,
+                ready_tick: 250
+            })
+        );
+        tick.tick = 250;
+        engine.update_epoch_phase(&tick, noon + TimeDelta::seconds(602));
+        assert_eq!(engine.epoch_phase, Some(EpochPhase::Active { epoch: 10 }));
+    }
+
+    #[test]
     fn target_arithmetic_never_wraps() {
         assert_eq!(next_stream_tick(12, 0), Some(12));
         assert_eq!(next_stream_tick(12, 1), Some(13));
@@ -3366,12 +4084,12 @@ mod tests {
         engine.ensure_status_query(1, 100);
         tokio::task::yield_now().await;
         engine.harvest_status_query().await;
-        for _ in 0..4 {
-            tokio::time::advance(Duration::from_millis(100)).await;
+        for _ in 0..24 {
+            tokio::time::advance(Duration::from_millis(20)).await;
             engine.ensure_status_query(1, 100);
             assert!(engine.status_query.is_none());
         }
-        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::time::advance(Duration::from_millis(20)).await;
         engine.ensure_status_query(1, 101);
         assert!(engine.status_query.is_some());
     }
@@ -3400,7 +4118,10 @@ mod tests {
             })
         }
 
-        async fn tick_has_transactions(&self, _tick: u32) -> Result<bool, BackendError> {
+        async fn tick_has_transactions(
+            &self,
+            _tick: u32,
+        ) -> Result<TickTransactions, BackendError> {
             self.checks.fetch_add(1, Ordering::Relaxed);
             std::future::pending().await
         }
@@ -3424,6 +4145,132 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn cancelling_engine_drops_pending_shutdown_observer() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (lifetime_tx, lifetime_rx) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn(engine(Arc::new(MockBackend::default())).run(
+            async move {
+                let _lifetime = lifetime_tx;
+                started_tx.send(()).unwrap();
+                std::future::pending::<AppResult<()>>().await
+            },
+            Duration::from_millis(20),
+        ));
+        started_rx.await.unwrap();
+        running.abort();
+        assert!(running.await.unwrap_err().is_cancelled());
+        assert!(
+            timeout(Duration::from_millis(100), lifetime_rx)
+                .await
+                .expect("shutdown observer leaked after engine cancellation")
+                .is_err()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_cycle_tick_jump_requires_post_gap_absence() {
+        let backend = Arc::new(SlowMonitoringBackend {
+            started: Instant::now() - Duration::from_secs(100),
+            accepted: Mutex::new(Vec::new()),
+            checks: AtomicUsize::new(0),
+        });
+        let mut engine = engine(Arc::new(MockBackend::default()));
+        engine.backend = backend.clone();
+        engine.epoch_stop_lead_time_secs = 0;
+        engine.epoch_phase = Some(EpochPhase::Active { epoch: 1 });
+        for index in 0..3 {
+            prepare_normal_call(&mut engine, index);
+        }
+        let cancellation = CancellationToken::new();
+        engine.cycle(&cancellation).await.unwrap();
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 0,
+                failed: 3,
+                empty: 0
+            }
+        );
+        for slot in &engine.slots {
+            assert!(slot.chain.is_none());
+            assert_eq!(
+                slot.state,
+                SlotState::Waiting {
+                    absence_after_tick: 501,
+                    absence_observed: false,
+                }
+            );
+        }
+        assert!(backend.accepted.lock().unwrap().is_empty());
+        for requested_tick in [500, 501] {
+            if let Some(old) = engine.status_query.take() {
+                old.task.abort();
+            }
+            if requested_tick == 501 {
+                tokio::time::advance(Duration::from_millis(250)).await;
+            }
+            let task = tokio::spawn(async { Ok(ProviderStatus { slots: Vec::new() }) });
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            engine.status_query = Some(PendingStatusQuery {
+                epoch: 1,
+                requested_tick,
+                task,
+            });
+            engine.cycle(&cancellation).await.unwrap();
+            for slot in &engine.slots {
+                assert_eq!(slot.chain.is_some(), requested_tick == 501);
+                if let Some(chain) = &slot.chain {
+                    assert!(chain.first_target >= 507);
+                    assert_eq!(chain.first_target % 3, u32::from(slot.key.stream));
+                }
+            }
+        }
+        assert_eq!(
+            engine.send_stats,
+            SendStats {
+                ok: 0,
+                failed: 3,
+                empty: 0
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_during_tick_fetch_does_not_start_new_chains() {
+        let backend = Arc::new(SlowMonitoringBackend {
+            started: Instant::now(),
+            accepted: Mutex::new(Vec::new()),
+            checks: AtomicUsize::new(0),
+        });
+        let mut engine = ProviderEngine::new(
+            backend.clone(),
+            QubicWallet::from_seed(&"a".repeat(55)).unwrap(),
+            10_000,
+            0,
+            0,
+            600,
+            1,
+        );
+        engine.epoch_phase = Some(EpochPhase::Active { epoch: 1 });
+        for stream in 0..3 {
+            observe_absence(&mut engine, stream, 99);
+        }
+        engine
+            .run(
+                async {
+                    sleep(Duration::from_millis(5)).await;
+                    Ok(())
+                },
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap();
+        assert!(backend.accepted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn mining_meets_six_tick_schedule_while_monitoring_stalls_and_shutdown_drains() {
         let backend = Arc::new(SlowMonitoringBackend {
             started: Instant::now(),
@@ -3444,10 +4291,13 @@ mod tests {
             observe_absence(&mut engine, stream, 99);
         }
         engine
-            .run(async {
-                sleep(Duration::from_secs(5)).await;
-                Ok(())
-            })
+            .run(
+                async {
+                    sleep(Duration::from_secs(5)).await;
+                    Ok(())
+                },
+                Duration::from_millis(20),
+            )
             .await
             .unwrap();
         let accepted = backend.accepted.lock().unwrap();
@@ -3460,7 +4310,8 @@ mod tests {
             by_target.entry(target).or_default().push(now);
         }
         for (&target, attempts) in &by_target {
-            assert!((5..=6).contains(&(target - attempts[0])), "{accepted:?}");
+            let lead_range = if target <= 108 { 5..=6 } else { 3..=4 };
+            assert!(lead_range.contains(&(target - attempts[0])), "{accepted:?}");
             assert!(attempts.len() <= 2, "{accepted:?}");
             if let Some(&second) = attempts.get(1) {
                 assert!((3..=4).contains(&(target - second)), "{accepted:?}");

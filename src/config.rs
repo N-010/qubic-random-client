@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::{IsTerminal as _, Write as _};
 
 use clap::{Parser, ValueEnum};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const DEFAULT_RPC_ENDPOINT: &str = "https://rpc.qubic.org";
 const DEFAULT_BOB_ENDPOINT: &str = scapi::bob::DEFAULT_BOB_RPC_ENDPOINT;
@@ -39,7 +39,7 @@ impl BackendKind {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "random-client",
     version,
@@ -87,6 +87,15 @@ struct Cli {
         default_value_t = DEFAULT_EPOCH_RESUME_DELAY_TICKS
     )]
     epoch_resume_delay_ticks: u32,
+}
+
+impl fmt::Debug for Cli {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cli")
+            .field("backend", &self.backend)
+            .field("collateral", &self.collateral)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct AppConfig {
@@ -190,7 +199,8 @@ impl fmt::Debug for Seed {
 }
 
 fn normalize_endpoint(backend: BackendKind, endpoint: String) -> String {
-    let mut endpoint = endpoint.trim().trim_end_matches('/').to_string();
+    let (base, suffix) = endpoint_parts(endpoint.trim());
+    let mut endpoint = base.trim_end_matches('/').to_string();
     if backend == BackendKind::Rpc {
         for suffix in ["/live/v1", "/query/v1", "/v1"] {
             if let Some(base) = endpoint.strip_suffix(suffix) {
@@ -204,10 +214,24 @@ fn normalize_endpoint(backend: BackendKind, endpoint: String) -> String {
         endpoint = base.trim_end_matches('/').to_string();
     }
     if endpoint.contains("://") {
-        endpoint
+        format!("{endpoint}{suffix}")
     } else {
-        format!("http://{endpoint}")
+        format!("http://{endpoint}{suffix}")
     }
+}
+
+fn endpoint_parts(endpoint: &str) -> (&str, &str) {
+    let split = endpoint.find(['?', '#']).unwrap_or(endpoint.len());
+    endpoint.split_at(split)
+}
+
+pub(crate) fn append_endpoint_path(endpoint: &str, path: &str) -> String {
+    let (base, suffix) = endpoint_parts(endpoint);
+    format!(
+        "{}/{}{suffix}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 pub fn redacted_endpoint(endpoint: &str) -> String {
@@ -246,9 +270,11 @@ fn read_seed_from_stdin() -> Result<String, String> {
         std::io::stdout()
             .flush()
             .map_err(|err| format!("failed to flush stdout: {err}"))?;
-        rpassword::read_password().map_err(|err| format!("failed to read seed: {err}"))?
+        Zeroizing::new(
+            rpassword::read_password().map_err(|err| format!("failed to read seed: {err}"))?,
+        )
     } else {
-        let mut input = String::new();
+        let mut input = Zeroizing::new(String::new());
         std::io::stdin()
             .read_line(&mut input)
             .map_err(|err| format!("failed to read seed: {err}"))?;
@@ -337,6 +363,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cli_debug_omits_raw_seed_and_endpoint() {
+        let seed = "a".repeat(55);
+        let cli = Cli::try_parse_from([
+            "random-client",
+            "--seed",
+            &seed,
+            "--endpoint",
+            "http://test-user:test-password@localhost?token=test-token#test-fragment",
+        ])
+        .unwrap();
+        let output = format!("{cli:?}");
+        for secret in [
+            &seed,
+            "test-user",
+            "test-password",
+            "test-token",
+            "test-fragment",
+        ] {
+            assert!(!output.contains(secret), "Debug exposed CLI secrets");
+        }
+    }
+
+    #[test]
     fn endpoint_normalization_is_backend_specific() {
         assert_eq!(
             normalize_endpoint(BackendKind::Rpc, "rpc.qubic.org/live/v1/".to_string()),
@@ -345,6 +394,23 @@ mod tests {
         assert_eq!(
             normalize_endpoint(BackendKind::Bob, "http://localhost:40420/qubic".to_string()),
             "http://localhost:40420"
+        );
+    }
+
+    #[test]
+    fn endpoint_suffixes_do_not_consume_query_or_fragment() {
+        for (kind, path) in [(BackendKind::Rpc, "live/v1"), (BackendKind::Bob, "qubic")] {
+            assert_eq!(
+                normalize_endpoint(
+                    kind,
+                    format!("https://host/prefix/{path}/?token=a%2Fb/#note/")
+                ),
+                "https://host/prefix?token=a%2Fb/#note/"
+            );
+        }
+        assert_eq!(
+            normalize_endpoint(BackendKind::Rpc, "host?token=/v1".into()),
+            "http://host?token=/v1"
         );
     }
 

@@ -1,26 +1,35 @@
-/target
+# Build outputs and temporary artifacts
+/target/
+/dist/
+/.tmp/
+/*.zip
 
-/secrets/random_seed
+# Local secrets and environment (keep shareable examples visible)
+/secrets/
+/.env
+/.env.*
+!/.env.example
 
-/.idea
+# IDE state
+/.idea/
 
+# Local AI tooling and indexes
+/.agents/
+/.claude/
+/.codex/
+/.gitnexus/
+/AGENTS.md
+/CLAUDE.md
 
-*.zip
+# Existing local container and cross-build configuration
+/.dockerignore
+/Dockerfile
+/compose.yaml
+/Cross.toml
 
-# Local container, cross-build, and operator tooling
-.dockerignore
-Dockerfile*
-compose*.yml
-compose*.yaml
-docker-compose*.yml
-docker-compose*.yaml
-Cross.toml
-*.ps1
-
-# LLM
-.agents
-.claude
-/.codex*
-.gitnexus
-AGENTS.md
-CLAUDE.md
+# Existing local operator scripts; do not hide all PowerShell scripts
+/MultiClient.ps1
+/run-local.ps1
+/run-remote.ps1
+/stop-local.ps1
+/stop-remote.ps1
