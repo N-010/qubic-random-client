@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## v2.1.0 - 2026-10-26
+
+### Security
+
+- Delay normal and terminal reveal broadcasts until T-4, including retries,
+  while retaining six-tick planning and early first-commit submission.
+- Bound HTTP response bodies and redact backend errors, returned identifiers,
+  credentials, and transaction material from diagnostics.
+- Zeroize temporary seed-input buffers, including failure paths; patch vendored
+  rtoolbox to clear the current allocation, including terminal-deleted bytes.
+- Update dependencies to address advisory and dependency-policy findings.
+
+### Added
+
+- Report transaction inclusion by comparing the full locally computed hash
+  with authenticated TickData digests supplied by QubicLightNode. Inclusion
+  is distinct from contract execution and does not alter financial counters.
+- Poll the local gRPC tick cache every 20 ms without increasing the
+  provider-status request rate.
+
+### Fixed
+
+- Harden immutable-byte retries, target expiry, overlapping restart handling,
+  status-observation freshness, tick jumps, epoch cleanup, and shutdown.
+- Reject duplicate provider stream/tier entries and inconsistent TickData
+  digest responses instead of treating them as usable observations.
+- Require positive RPC peer acceptance; validate Bob response IDs and errors,
+  reject malformed hexadecimal payloads, and preserve endpoint query strings.
+
+### Changed
+
+- Gate release publication on successful Linux and Windows builds, matching
+  package/tag versions, binary version/help checks, and SHA256 verification.
+- Publish SHA256SUMS; add manual CI, weekly dependency checks, job timeouts,
+  and write permission restricted to the publication job.
+- Expand regression coverage and architecture documentation; organize
+  repository ignore rules while retaining vendored sources and Cargo.lock.
+
 ## v2.0.3 - 2026-09-09
 
 ### Fixed
